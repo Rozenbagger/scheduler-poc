@@ -39,12 +39,12 @@ def save_data(data):
 if "db_state" not in st.session_state:
     st.session_state.db_state = load_data()
 
-# Initialize dynamic DataFrames for AI modifications
+# Initialize dynamic DataFrames for AI modifications (NEW: Added 'Zone')
 if "shifts_df" not in st.session_state:
     st.session_state.shifts_df = pd.DataFrame([
-        {"Task ID": "TSK-01", "Shift Name": "Day Shift", "Start Time": datetime.time(7, 0), "End Time": datetime.time(15, 0), "Req Headcount": 2},
-        {"Task ID": "TSK-02", "Shift Name": "Night Shift", "Start Time": datetime.time(23, 0), "End Time": datetime.time(7, 0), "Req Headcount": 1},
-        {"Task ID": "TSK-03", "Shift Name": "24h Sick Call", "Start Time": datetime.time(7, 0), "End Time": datetime.time(7, 0), "Req Headcount": 1}
+        {"Task ID": "TSK-01", "Shift Name": "Day Shift", "Zone": "Main ER", "Start Time": datetime.time(7, 0), "End Time": datetime.time(15, 0), "Req Headcount": 2},
+        {"Task ID": "TSK-02", "Shift Name": "Night Shift", "Zone": "Main ER", "Start Time": datetime.time(23, 0), "End Time": datetime.time(7, 0), "Req Headcount": 1},
+        {"Task ID": "TSK-03", "Shift Name": "24h Sick Call", "Zone": "On Call", "Start Time": datetime.time(7, 0), "End Time": datetime.time(7, 0), "Req Headcount": 1}
     ])
 if "physicians_df" not in st.session_state:
     st.session_state.physicians_df = pd.DataFrame([
@@ -66,7 +66,7 @@ if "logged_in" not in st.session_state:
     st.session_state.current_role = None
     st.session_state.current_name = None
 
-# --- 3. HELPER FUNCTIONS & NEW GENAI SDK PARSERS ---
+# --- 3. HELPER FUNCTIONS & AI PARSERS ---
 def parse_constraints(user_text, key, roster, shifts):
     client = genai.Client(api_key=key)
     prompt = f"""
@@ -74,13 +74,7 @@ def parse_constraints(user_text, key, roster, shifts):
     Respond ONLY with a JSON array: [{{ "physician_name": "exact name", "constraint_type": "soft_prefer_shift" OR "soft_avoid_shift" OR "hard_time_off", "target_date": "YYYY-MM-DD" or null, "target_shift": "exact shift name" or null }}]
     Text: "{user_text}"
     """
-    response = client.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-        )
-    )
+    response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
     return json.loads(response.text)
 
 def parse_config_modifications(user_text, key, current_docs, current_shifts):
@@ -98,17 +92,11 @@ def parse_config_modifications(user_text, key, current_docs, current_shifts):
     Respond ONLY with a JSON matching this schema:
     {{
       "upsert_physicians": [{{ "Provider ID": "optional existing ID", "Name": "...", "Max Total": int, "Max Nights": int, "Max Weekends": int }}],
-      "upsert_shifts": [{{ "Task ID": "optional existing ID", "Shift Name": "...", "Start Time": "HH:MM", "End Time": "HH:MM", "Req Headcount": int }}]
+      "upsert_shifts": [{{ "Task ID": "optional existing ID", "Shift Name": "...", "Zone": "...", "Start Time": "HH:MM", "End Time": "HH:MM", "Req Headcount": int }}]
     }}
     Text: "{user_text}"
     """
-    response = client.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-        )
-    )
+    response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
     return json.loads(response.text)
 
 def times_overlap(s_start, s_end, u_start, u_end):
@@ -118,6 +106,61 @@ def times_overlap(s_start, s_end, u_start, u_end):
     if se <= ss: se += 24 * 60
     if ue <= us: ue += 24 * 60
     return max(ss, us) < min(se, ue)
+
+# --- VISUAL CALENDAR RENDERER ---
+def render_calendar_view(saved_schedule):
+    if not saved_schedule:
+        st.info("No schedule has been generated yet.")
+        return
+
+    try:
+        # Determine starting day of the week to pad the calendar correctly
+        first_date_str = saved_schedule[0]["Date"]
+        first_date = datetime.datetime.strptime(first_date_str, "%Y-%m-%d").date()
+        start_weekday = first_date.weekday() # Monday = 0, Sunday = 6
+
+        # Build the HTML/CSS Grid
+        html = "<div style='display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; margin-top: 15px;'>"
+        
+        # Day Headers
+        days_of_week = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        for d in days_of_week:
+            html += f"<div style='text-align: center; font-weight: bold; padding: 8px; background: #e9ecef; border-radius: 6px; color: #495057;'>{d}</div>"
+            
+        # Empty cells for days before the start date
+        for _ in range(start_weekday):
+            html += "<div style='padding: 10px;'></div>"
+
+        # Populate the actual days
+        for day in saved_schedule:
+            d_obj = datetime.datetime.strptime(day["Date"], "%Y-%m-%d").date()
+            day_str = d_obj.strftime("%b %d") # e.g., Oct 01
+            
+            html += f"<div style='border: 1px solid #dee2e6; border-radius: 8px; padding: 10px; background: white; min-height: 140px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);'>"
+            html += f"<div style='font-weight: bold; border-bottom: 2px solid #f8f9fa; margin-bottom: 8px; padding-bottom: 4px; color: #212529;'>{day_str}</div>"
+            
+            for shift in day["Shifts"]:
+                docs = shift["Physicians"]
+                if not docs: docs = "⚠️ UNASSIGNED"
+                
+                # Highlight missing coverage in red, standard assignments in blue
+                doc_color = "#dc3545" if "⚠️" in docs else "#0056b3"
+                doc_weight = "bold" if "⚠️" in docs else "500"
+
+                html += f"""
+                <div style='background: #f8f9fa; border-left: 4px solid #007bff; padding: 6px 8px; margin-bottom: 8px; border-radius: 4px;'>
+                    <div style='font-weight: bold; color: #343a40; font-size: 0.9em; margin-bottom: 2px;'>{shift["Name"]}</div>
+                    <div style='color: #6c757d; font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.5px;'>📍 {shift["Zone"]}</div>
+                    <div style='color: #495057; font-size: 0.8em; margin-bottom: 4px;'>🕒 {shift["Start"]} - {shift["End"]}</div>
+                    <div style='color: {doc_color}; font-weight: {doc_weight}; font-size: 0.85em;'>👨‍⚕️ {docs}</div>
+                </div>
+                """
+            html += "</div>" # End Day Cell
+            
+        html += "</div>" # End Grid
+        st.markdown(html, unsafe_allow_html=True)
+    except Exception as e:
+        st.error(f"Error rendering calendar view: Ensure you generated a new schedule to apply the new data format. ({e})")
 
 # --- 4. LOGIN SCREEN ---
 def login_screen():
@@ -148,13 +191,17 @@ def physician_view():
             st.rerun()
             
     st.header(f"Physician Portal: {st.session_state.current_name}")
-    tab1, tab2 = st.tabs(["📅 Published Schedule", "🛑 Manage Time Off"])
+    tab1, tab2 = st.tabs(["📅 Published Calendar", "🛑 Manage Time Off"])
     
     with tab1:
+        # Filter the structured JSON to only show days/shifts where this physician is assigned
         if st.session_state.db_state["saved_schedule"]:
-            df = pd.DataFrame(st.session_state.db_state["saved_schedule"])
-            mask = df.apply(lambda row: row.astype(str).str.contains(st.session_state.current_name).any(), axis=1)
-            st.dataframe(df[mask].drop(columns=['Day_Index'], errors='ignore'), use_container_width=True, hide_index=True)
+            personal_schedule = []
+            for day in st.session_state.db_state["saved_schedule"]:
+                personal_shifts = [s for s in day["Shifts"] if st.session_state.current_name in s["Physicians"]]
+                if personal_shifts:
+                    personal_schedule.append({"Date": day["Date"], "Shifts": personal_shifts})
+            render_calendar_view(personal_schedule)
         else:
             st.info("No schedules have been published.")
 
@@ -200,13 +247,13 @@ def admin_view():
         min_rest_hours = st.number_input("Mandatory Rest (Hrs)", 0, 48, 12)
 
     st.header("Admin Command Center")
-    tab_config, tab_engine, tab_master = st.tabs(["👥 1. Staff & Shifts", "🧠 2. AI Engine", "📊 3. Master & Export"])
+    tab_config, tab_engine, tab_master = st.tabs(["👥 1. Staff & Shifts", "🧠 2. AI Engine", "📅 3. Master Calendar & Export"])
     
     with tab_config:
         st.markdown("#### ✨ AI Configuration Assistant")
         col_config, col_btn = st.columns([4, 1])
         with col_config:
-            config_prompt = st.text_input("Ask AI to add or edit physicians/shifts:", placeholder="e.g., 'Update Dr. Smith to max 40 shifts. Add a 12h Swing shift.'", label_visibility="collapsed")
+            config_prompt = st.text_input("Ask AI to add or edit physicians/shifts:", placeholder="e.g., 'Update Dr. Smith to max 40 shifts. Add a 12h Fast-Track shift in the Triage Zone.'", label_visibility="collapsed")
         with col_btn:
             if st.button("Modify Models", use_container_width=True):
                 if not api_key: 
@@ -215,7 +262,6 @@ def admin_view():
                     with st.spinner("AI is executing database operations..."):
                         c_docs = st.session_state.physicians_df.to_json(orient="records", date_format="iso")
                         c_shifts = st.session_state.shifts_df.to_json(orient="records", date_format="iso")
-                        
                         updates = parse_config_modifications(config_prompt, api_key, c_docs, c_shifts)
                         
                         if "upsert_physicians" in updates:
@@ -244,16 +290,13 @@ def admin_view():
                                     existing_nums = [int(x.split('-')[1]) for x in st.session_state.shifts_df["Task ID"] if '-' in str(x) and str(x).split('-')[1].isdigit()]
                                     s["Task ID"] = f"TSK-{(max(existing_nums) + 1 if existing_nums else 1):02d}"
                                     st.session_state.shifts_df = pd.concat([st.session_state.shifts_df, pd.DataFrame([s])], ignore_index=True)
-                        
                         st.rerun()
         st.divider()
 
-        col_shifts, col_docs = st.columns([1, 1.5])
-        
+        col_shifts, col_docs = st.columns([1.5, 1])
         with col_shifts:
-            st.markdown("#### Shift Definitions")
+            st.markdown("#### Shift Definitions & Zones")
             edited_shifts = st.data_editor(st.session_state.shifts_df, num_rows="dynamic", hide_index=True, use_container_width=True, disabled=["Task ID"])
-            
             needs_update = False
             for idx, row in edited_shifts.iterrows():
                 if pd.isna(row["Task ID"]) or str(row["Task ID"]).strip() == "":
@@ -266,7 +309,6 @@ def admin_view():
         with col_docs:
             st.markdown("#### Provider Contracts")
             edited_docs = st.data_editor(st.session_state.physicians_df, num_rows="dynamic", hide_index=True, use_container_width=True, disabled=["Provider ID"])
-            
             needs_update_docs = False
             for idx, row in edited_docs.iterrows():
                 if pd.isna(row["Provider ID"]) or str(row["Provider ID"]).strip() == "":
@@ -280,9 +322,10 @@ def admin_view():
         physicians_list = [r["Name"] for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")]
         carryover_docs = st.multiselect("Select providers who worked the final overnight shift of the previous period:", physicians_list)
 
-    # Process Data logic
+    # Dictionary Map Generation
     shift_reqs = {r["Shift Name"]: int(r["Req Headcount"]) for _, r in st.session_state.shifts_df.iterrows() if r.get("Shift Name")}
     shift_times = {r["Shift Name"]: {"start": r["Start Time"], "end": r["End Time"]} for _, r in st.session_state.shifts_df.iterrows() if r.get("Shift Name")}
+    shift_zones = {r["Shift Name"]: r.get("Zone", "Unspecified") for _, r in st.session_state.shifts_df.iterrows() if r.get("Shift Name")}
     shift_ids = {r["Shift Name"]: r["Task ID"] for _, r in st.session_state.shifts_df.iterrows() if r.get("Shift Name")}
     shifts_list = list(shift_reqs.keys())
 
@@ -296,7 +339,6 @@ def admin_view():
 
     with tab_engine:
         col_ai, col_requests = st.columns([2, 1])
-        
         with col_requests:
             req_count = len(st.session_state.db_state["global_unavail"])
             st.metric("Pending Time-Off Requests", req_count)
@@ -308,8 +350,7 @@ def admin_view():
                         save_data(st.session_state.db_state)
                         st.toast("Requests cleared.", icon="🗑️")
                         st.rerun()
-                else:
-                    st.write("No pending requests.")
+                else: st.write("No pending requests.")
 
         with col_ai:
             st.markdown("#### AI Natural Language Rules")
@@ -332,7 +373,6 @@ def admin_view():
                     for req in st.session_state.db_state["global_unavail"]:
                         req_date = datetime.datetime.strptime(req['date'], "%Y-%m-%d").date()
                         target_d = (req_date - schedule_start_date).days
-                        
                         if 0 <= target_d < num_days:
                             req_start = datetime.datetime.strptime(req['start'], "%H:%M").time()
                             req_end = datetime.datetime.strptime(req['end'], "%H:%M").time()
@@ -390,16 +430,11 @@ def admin_view():
                     for r in rules:
                         if r.get("physician_name") not in physicians_list: continue 
                         p = internal_physicians.index(r["physician_name"])
-                        c_type = r.get("constraint_type")
-                        t_s = shifts_list.index(r["target_shift"]) if r.get("target_shift") in shifts_list else None
-                        
+                        c_type, t_s = r.get("constraint_type"), shifts_list.index(r["target_shift"]) if r.get("target_shift") in shifts_list else None
                         t_d = None
-                        if "target_d" in r:
-                            t_d = r["target_d"]
+                        if "target_d" in r: t_d = r["target_d"]
                         elif r.get("target_date"):
-                            try:
-                                t_date = datetime.datetime.strptime(r.get("target_date"), "%Y-%m-%d").date()
-                                t_d = (t_date - schedule_start_date).days
+                            try: t_d = (datetime.datetime.strptime(r.get("target_date"), "%Y-%m-%d").date() - schedule_start_date).days
                             except ValueError: pass
                         
                         if t_d is not None and not (0 <= t_d < num_days): continue
@@ -425,16 +460,20 @@ def admin_view():
 
                     if solver.Solve(model) in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
                         grid = []
+                        # Build the highly structured JSON needed for the new visual calendar
                         for d in range(num_days):
-                            current_date = schedule_start_date + datetime.timedelta(days=d)
-                            date_str = current_date.strftime("%Y-%m-%d")
-                            day_name = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][current_date.weekday()]
-                            
-                            row = {"Date": f"{date_str} ({day_name})", "Day_Index": d}
+                            date_str = (schedule_start_date + datetime.timedelta(days=d)).strftime("%Y-%m-%d")
+                            day_data = {"Date": date_str, "Shifts": []}
                             for s, s_name in enumerate(shifts_list):
                                 docs = [internal_physicians[p] for p in range(len(internal_physicians)) if solver.Value(shifts[(p, d, s)]) == 1]
-                                row[s_name] = ", ".join(docs)
-                            grid.append(row)
+                                day_data["Shifts"].append({
+                                    "Name": s_name,
+                                    "Zone": shift_zones.get(s_name, "Unspecified"),
+                                    "Start": shift_times[s_name]['start'].strftime("%H:%M"),
+                                    "End": shift_times[s_name]['end'].strftime("%H:%M"),
+                                    "Physicians": ", ".join(docs)
+                                })
+                            grid.append(day_data)
                         
                         st.session_state.db_state["saved_schedule"] = grid
                         save_data(st.session_state.db_state)
@@ -445,28 +484,25 @@ def admin_view():
                         st.error("Solver failed. The combination of constraints and time off requested is mathematically impossible.")
 
     with tab_master:
-        if st.session_state.db_state["saved_schedule"]:
-            df = pd.DataFrame(st.session_state.db_state["saved_schedule"])
-            display_df = df.drop(columns=['Day_Index'])
-            st.dataframe(display_df.style.map(lambda v: 'background-color: #ffcccc; color: #990000; font-weight: bold' if '⚠️ UNASSIGNED GAP' in str(v) else ''), use_container_width=True, hide_index=True)
+        render_calendar_view(st.session_state.db_state["saved_schedule"])
 
+        if st.session_state.db_state["saved_schedule"]:
+            st.divider()
             st.markdown("#### Enterprise Integration")
             flat = []
-            for idx, r in df.iterrows():
-                date_str = (schedule_start_date + datetime.timedelta(days=r["Day_Index"])).strftime("%Y-%m-%d")
-                for s_name in shifts_list:
-                    for doc in [d.strip() for d in str(r[s_name]).split(",") if d.strip() and d.strip() != "nan"]:
+            for day in st.session_state.db_state["saved_schedule"]:
+                for shift in day["Shifts"]:
+                    for doc in [d.strip() for d in str(shift["Physicians"]).split(",") if d.strip() and d.strip() != "nan"]:
                         flat.append({
-                            "Date": date_str,
+                            "Date": day["Date"],
                             "Provider_ID": p_ids.get(doc, "SYS-GAP"),
-                            "Task_ID": shift_ids.get(s_name, "UNKNOWN"),
-                            "Start": shift_times[s_name]['start'].strftime("%H:%M"),
-                            "End": shift_times[s_name]['end'].strftime("%H:%M")
+                            "Task_ID": shift_ids.get(shift["Name"], "UNKNOWN"),
+                            "Zone": shift["Zone"],
+                            "Start": shift["Start"],
+                            "End": shift["End"]
                         })
             
             st.download_button("📥 Download QGenda / Amion CSV Payload", pd.DataFrame(flat).to_csv(index=False).encode('utf-8'), 'enterprise_export.csv', 'text/csv', type="secondary")
-        else:
-            st.info("No schedule has been generated yet. Navigate to the AI Engine tab to build one.")
 
 # --- 7. ROUTER ---
 if not st.session_state.logged_in: login_screen()
