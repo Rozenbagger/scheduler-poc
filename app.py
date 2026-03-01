@@ -54,7 +54,7 @@ if "logged_in" not in st.session_state:
 # --- 3. HELPER FUNCTIONS (AI Parsers) ---
 def parse_constraints(user_text, key, roster, shifts):
     genai.configure(api_key=key)
-    model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
+    model = genai.GenerativeModel('gemini-2.5-flash', generation_config={"response_mime_type": "application/json"})
     prompt = f"""
     You are a scheduling assistant. Extract scheduling rules. Roster: {roster}. Shifts: {shifts}.
     Respond ONLY with a JSON array: [{{ "physician_name": "exact name", "constraint_type": "soft_prefer_shift" OR "soft_avoid_shift" OR "hard_time_off", "target_day": integer or null, "target_shift": "exact shift name" or null }}]
@@ -64,7 +64,7 @@ def parse_constraints(user_text, key, roster, shifts):
 
 def parse_config_updates(user_text, key):
     genai.configure(api_key=key)
-    model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
+    model = genai.GenerativeModel('gemini-2.5-flash', generation_config={"response_mime_type": "application/json"})
     prompt = f"""
     You are an AI database administrator. Extract table configuration additions.
     Output JSON with an "updates" array containing objects of "type": "add_shift" or "add_physician".
@@ -76,7 +76,7 @@ def parse_config_updates(user_text, key):
 
 def parse_timeoff_request(user_text, key):
     genai.configure(api_key=key)
-    model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
+    model = genai.GenerativeModel('gemini-2.5-flash', generation_config={"response_mime_type": "application/json"})
     prompt = f"""
     Extract time-off requests.
     Output JSON array: [{{ "day": integer (e.g. 1 for Day 1), "start": "HH:MM", "end": "HH:MM" }}]
