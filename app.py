@@ -3,31 +3,43 @@ import pandas as pd
 from google import genai
 import json
 import datetime
-import os
+from ortools.sat.python import cp_model
 
-# --- 1. SETTINGS ---
-st.set_page_config(page_title="Shift Command v20-Fixed", page_icon="🏥", layout="wide")
+# --- 1. SETTINGS & UI CONFIG ---
+st.set_page_config(page_title="Medical Scheduler v17", page_icon="🏥", layout="wide")
 
-# Initialize Session State
+# Initialize Session State Dataframes
 if "shifts_df" not in st.session_state:
     st.session_state.shifts_df = pd.DataFrame([
-        {"Task ID": "TSK-01", "Shift Name": "Day Shift", "Start Time": "07:00", "End Time": "15:00", "Req Headcount": 2},
-        {"Task ID": "TSK-02", "Shift Name": "Night Shift", "Start Time": "23:00", "End Time": "07:00", "Req Headcount": 1}
+        {"Shift Name": "Day Shift", "Start": "07:00", "End": "15:00", "Count": 2},
+        {"Shift Name": "Night Shift", "Start": "23:00", "End": "07:00", "Count": 1}
     ])
 
 if "physicians_df" not in st.session_state:
     st.session_state.physicians_df = pd.DataFrame([
-        {"Provider ID": "DOC-01", "Name": "Dr. Smith", "Max Total": 30},
-        {"Provider ID": "DOC-02", "Name": "Dr. Jones", "Max Total": 30}
+        {"Name": "Dr. Smith", "Max Shifts": 20},
+        {"Name": "Dr. Jones", "Max Shifts": 20}
     ])
 
-# A counter to force the data_editor to refresh when AI updates the table
-if "editor_key" not in st.session_state:
-    st.session_state.editor_key = 0
+# Force-refresh key for data editors
+if "widget_sync" not in st.session_state:
+    st.session_state.widget_sync = 0
 
-# --- 2. THE AI ENGINE ---
-def call_ai(prompt, key):
-    client = genai.Client(api_key=key)
+# --- 2. AI CORE (GEMINI 2.5 FLASH) ---
+def run_ai_command(user_input, api_key):
+    client = genai.Client(api_key=api_key)
+    prompt = f"""
+    You are a hospital admin assistant. Update the schedule data based on: "{user_input}"
+    
+    Return ONLY a JSON object with this structure:
+    {{
+      "action": "add_shift" OR "add_physician" OR "update",
+      "data": {{ 
+        "Shift Name": "...", "Start": "HH:MM", "End": "HH:MM", "Count": 1,
+        "Name": "...", "Max Shifts": 20
+      }}
+    }}
+    """
     response = client.models.generate_content(
         model='gemini-2.5-flash',
         contents=prompt,
@@ -36,75 +48,59 @@ def call_ai(prompt, key):
     return json.loads(response.text)
 
 # --- 3. ADMIN INTERFACE ---
-st.title("🏥 Admin Dashboard")
+st.title("🏥 Medical Scheduler v17")
 
 with st.sidebar:
     api_key = st.text_input("Gemini API Key:", type="password")
-    st.divider()
-    if st.button("Reset All Data"):
+    if st.button("Reset Session"):
         st.session_state.clear()
         st.rerun()
 
-tab_config, tab_rules = st.tabs(["📊 Shift & Physician Data", "⚖️ Manual Rules"])
+# AI COMMAND BAR
+st.subheader("🤖 AI Command Center")
+cmd_text = st.text_input("Tell the AI what to change:", placeholder="e.g. 'Add a Swing shift from 15:00 to 23:00 with headcount 1'")
 
-with tab_config:
-    st.subheader("AI Table Commands")
-    ai_input = st.text_input("Add/Update Data", placeholder="e.g. 'Add shift Swing 15:00-23:00 with 1 headcount'")
-    
-    if st.button("Run AI Command") and api_key:
-        prompt = f"""
-        Extract data updates from: '{ai_input}'. 
-        Return JSON with 'updates' list. 
-        Update Types: 'add_shift' (fields: Name, Start, End, Count) or 'add_physician' (fields: Name, Max).
-        """
-        try:
-            res = call_ai(prompt, api_key)
-            for item in res.get("updates", []):
-                if item["type"] == "add_shift":
-                    new_row = {
-                        "Task ID": f"TSK-{len(st.session_state.shifts_df)+1:02d}",
-                        "Shift Name": item.get("Name"),
-                        "Start Time": item.get("Start"),
-                        "End Time": item.get("End"),
-                        "Req Headcount": int(item.get("Count", 1))
-                    }
-                    st.session_state.shifts_df = pd.concat([st.session_state.shifts_df, pd.DataFrame([new_row])], ignore_index=True)
-                
-                elif item["type"] == "add_physician":
-                    new_phys = {
-                        "Provider ID": f"DOC-{len(st.session_state.physicians_df)+1:02d}",
-                        "Name": item.get("Name"),
-                        "Max Total": int(item.get("Max", 30))
-                    }
-                    st.session_state.physicians_df = pd.concat([st.session_state.physicians_df, pd.DataFrame([new_phys])], ignore_index=True)
+if st.button("Execute Command") and api_key:
+    try:
+        result = run_ai_command(cmd_text, api_key)
+        data = result.get("data", {})
+        
+        if result["action"] == "add_shift":
+            new_row = pd.DataFrame([data])
+            st.session_state.shifts_df = pd.concat([st.session_state.shifts_df, new_row], ignore_index=True)
+        
+        elif result["action"] == "add_physician":
+            new_row = pd.DataFrame([data])
+            st.session_state.physicians_df = pd.concat([st.session_state.physicians_df, new_row], ignore_index=True)
             
-            # Increment the key to force the widget to re-render with new data
-            st.session_state.editor_key += 1
-            st.success("Table updated successfully!")
-            st.rerun()
-        except Exception as e:
-            st.error(f"AI could not parse command: {e}")
+        st.session_state.widget_sync += 1
+        st.success(f"Action '{result['action']}' completed!")
+        st.rerun()
+    except Exception as e:
+        st.error(f"AI Error: {e}")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.write("**Shift Schedule**")
-        # We use the dynamic key here to fix the "unable to update" bug
-        st.session_state.shifts_df = st.data_editor(
-            st.session_state.shifts_df, 
-            key=f"shift_editor_{st.session_state.editor_key}", 
-            hide_index=True, 
-            num_rows="dynamic"
-        )
-    with c2:
-        st.write("**Provider Roster**")
-        st.session_state.physicians_df = st.data_editor(
-            st.session_state.physicians_df, 
-            key=f"phys_editor_{st.session_state.editor_key}", 
-            hide_index=True, 
-            num_rows="dynamic"
-        )
+# DATA TABLES
+st.divider()
+col1, col2 = st.columns(2)
 
-with tab_rules:
-    st.subheader("Assignment Rules")
-    st.info("Manual rules go here. No persistent ledger logic applied.")
-    rule_desc = st.text_area("Temporary Rule Notes (Non-persistent)")
+with col1:
+    st.write("### 🕒 Shift Definitions")
+    st.session_state.shifts_df = st.data_editor(
+        st.session_state.shifts_df, 
+        key=f"shift_ed_{st.session_state.widget_sync}",
+        hide_index=True, 
+        num_rows="dynamic"
+    )
+
+with col2:
+    st.write("### 👨‍⚕️ Physician Roster")
+    st.session_state.physicians_df = st.data_editor(
+        st.session_state.physicians_df, 
+        key=f"phys_ed_{st.session_state.widget_sync}",
+        hide_index=True, 
+        num_rows="dynamic"
+    )
+
+# --- 4. THE SOLVER (SIMPLIFIED) ---
+if st.button("🚀 Generate Schedule", type="primary"):
+    st.info("The OR-Tools solver is ready to process the tables above.")
