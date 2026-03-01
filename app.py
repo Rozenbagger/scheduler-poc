@@ -4,154 +4,79 @@ from google import genai
 import json
 import datetime
 import os
-from ortools.sat.python import cp_model
 
-# --- 1. SETTINGS & PERSISTENCE ---
-st.set_page_config(page_title="Medical Scheduler v26", page_icon="🏥", layout="wide")
+# --- PERSISTENCE ---
+DB_FILE = "scheduler_db.json"
 
-DB_FILE = "local_database.json"
-
-def load_data():
-    default_state = {
-        "global_unavail": [], 
-        "saved_schedule": None, 
-        "start_date": str(datetime.date.today()), 
-        "num_days": 30,
-        "admin_rules": []
-    }
+def load_db():
     if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r") as f:
-                data = json.load(f)
-                for k, v in default_state.items():
-                    if k not in data: data[k] = v
-                return data
-        except: return default_state
-    return default_state
+        with open(DB_FILE, "r") as f: return json.load(f)
+    return {"shifts": [], "physicians": [], "rules": []}
 
-def save_data(data):
-    with open(DB_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+def save_db(data):
+    with open(DB_FILE, "w") as f: json.dump(data, f, indent=4)
 
-if "db_state" not in st.session_state:
-    st.session_state.db_state = load_data()
+# Initialize Session
+if "db" not in st.session_state:
+    st.session_state.db = load_db()
 
-# Dataframe state for UI tables
-if "shifts_df" not in st.session_state:
-    st.session_state.shifts_df = pd.DataFrame([
-        {"Task ID": "TSK-01", "Shift Name": "Day Shift", "Start Time": "07:00", "End Time": "15:00", "Req Headcount": 2},
-        {"Task ID": "TSK-02", "Shift Name": "Night Shift", "Start Time": "23:00", "End Time": "07:00", "Req Headcount": 1}
-    ])
-
-if "physicians_df" not in st.session_state:
-    st.session_state.physicians_df = pd.DataFrame([
-        {"Provider ID": "DOC-01", "Name": "Dr. Smith", "Max Total": 30},
-        {"Provider ID": "DOC-02", "Name": "Dr. Jones", "Max Total": 30}
-    ])
-
-# --- 2. RESTORED AI PARSER (v21 Style Logic) ---
-def call_ai_v21_logic(prompt, key, is_json=True):
-    # Using Gemini 3 Flash for maximum extraction precision
-    client = genai.Client(api_key=key)
-    
-    # We explicitly request a Thinking Level of 'High' for complex extraction
+# --- AI CORE ---
+def ai_command(prompt, api_key):
+    client = genai.Client(api_key=api_key)
+    # Using Gemini 3 Flash for the v20-style high-speed extraction
     response = client.models.generate_content(
         model='gemini-3-flash',
         contents=prompt,
-        config={
-            "response_mime_type": "application/json" if is_json else "text/plain",
-            "thinking_level": "High" 
-        }
+        config={"response_mime_type": "application/json"}
     )
-    return json.loads(response.text) if is_json else response.text
+    return json.loads(response.text)
 
-# --- 3. ADMIN DASHBOARD ---
-def admin_view():
-    with st.sidebar:
-        st.header("🔑 AI Access")
-        api_key = st.text_input("Gemini API Key:", type="password")
-        st.divider()
-        st.caption("Running Engine: Gemini 3 Flash (2026 Edition)")
+# --- UI ---
+st.title("🏥 Medical Scheduler (v20 Restored)")
 
-    st.title("Admin Command Center")
-    t_data, t_rules, t_calendar = st.tabs(["📊 Shift & Provider Data", "⚖️ Rule Ledger", "🗓️ Calendar Control"])
+with st.sidebar:
+    api_key = st.text_input("Gemini API Key", type="password")
+    if st.button("Clear All Data"):
+        st.session_state.db = {"shifts": [], "physicians": [], "rules": []}
+        save_db(st.session_state.db)
+        st.rerun()
 
-    # --- TAB 1: DATA MANAGEMENT ---
-    with t_data:
-        st.subheader("Database Entry")
-        data_input = st.text_input("AI Data Command (Add Shifts/Docs)", placeholder="e.g. 'Add a Swing shift 15:00-23:00 with 1 person'")
-        if st.button("Execute Data Update") and api_key:
-            prompt = f"""
-            Identify shift or physician additions from: '{data_input}'.
-            Return JSON: {{"updates": [{{"type": "add_shift", "Shift Name": "...", "Start Time": "HH:MM", "End Time": "HH:MM", "Req Headcount": 1}}]}}
-            """
-            try:
-                res = call_ai_v21_logic(prompt, api_key)
-                for item in res.get("updates", []):
-                    if item["type"] == "add_shift":
-                        new_row = {
-                            "Task ID": f"TSK-{len(st.session_state.shifts_df)+1:02d}",
-                            "Shift Name": item["Shift Name"],
-                            "Start Time": item["Start Time"],
-                            "End Time": item["End Time"],
-                            "Req Headcount": int(item["Req Headcount"])
-                        }
-                        st.session_state.shifts_df = pd.concat([st.session_state.shifts_df, pd.DataFrame([new_row])], ignore_index=True)
-                st.success("Database entry recorded.")
-                st.rerun()
-            except: st.error("AI couldn't process that format. Try: 'Add shift [Name] [Start]-[End]'.")
+tab1, tab2, tab3 = st.tabs(["🕒 Shifts", "👨‍⚕️ Physicians", "📜 Rules"])
 
-        c1, c2 = st.columns(2)
-        with c1: st.session_state.shifts_df = st.data_editor(st.session_state.shifts_df, hide_index=True, num_rows="dynamic", key="data_s")
-        with c2: st.session_state.physicians_df = st.data_editor(st.session_state.physicians_df, hide_index=True, num_rows="dynamic", key="data_p")
+# TAB 1: SHIFTS
+with tab1:
+    st.subheader("Shift Management")
+    shift_cmd = st.text_input("Add Shift (e.g., 'Day Shift 07:00-15:00 headcount 2')")
+    if st.button("Add Shift") and api_key:
+        p = f"Extract shift: '{shift_cmd}'. Return JSON: {{'name': '...', 'start': 'HH:MM', 'end': 'HH:MM', 'count': 1}}"
+        res = ai_command(p, api_key)
+        st.session_state.db["shifts"].append(res)
+        save_db(st.session_state.db)
+        st.success(f"Added {res['name']}")
 
-    # --- TAB 2: RULE LEDGER (Restored List Logic) ---
-    with t_rules:
-        st.subheader("Scheduling Constraints")
-        rule_input = st.text_input("New Rule", placeholder="e.g. 'Dr. Smith doesn't do Day Shifts'")
-        if st.button("Add to List") and api_key:
-            roster = list(st.session_state.physicians_df["Name"])
-            shifts = list(st.session_state.shifts_df["Shift Name"])
-            prompt = f"""
-            Parse this rule: '{rule_input}'. Use roster {roster} and shifts {shifts}.
-            JSON array: [{{'physician_name': '...', 'constraint_type': 'soft_avoid_shift', 'target_shift': '...'}}]
-            """
-            try:
-                parsed = call_ai_v21_logic(prompt, api_key)
-                for p in parsed:
-                    st.session_state.db_state["admin_rules"].append({
-                        "active": True, 
-                        "description": rule_input, 
-                        "logic": p
-                    })
-                save_data(st.session_state.db_state)
-                st.rerun()
-            except: st.error("Invalid rule format.")
+    st.table(pd.DataFrame(st.session_state.db["shifts"]))
 
-        # Display the list of rules with a simple way to delete/modify
-        if st.session_state.db_state["admin_rules"]:
-            rules_df = pd.DataFrame(st.session_state.db_state["admin_rules"])
-            # Display editor for the user to toggle/edit
-            edited_rules = st.data_editor(rules_df[["active", "description"]], hide_index=True, use_container_width=True, key="rule_edit_list")
-            
-            if st.button("Update Active Rules"):
-                # Sync back changes to the session state
-                for i, row in edited_rules.iterrows():
-                    st.session_state.db_state["admin_rules"][i]["active"] = row["active"]
-                    st.session_state.db_state["admin_rules"][i]["description"] = row["description"]
-                save_data(st.session_state.db_state)
-                st.toast("Rule Ledger Updated!")
+# TAB 2: PHYSICIANS 
+with tab2:
+    st.subheader("Physician Roster")
+    phys_cmd = st.text_input("Add Physician (e.g., 'Dr. Smith, max 40 hours')")
+    if st.button("Add Physician") and api_key:
+        p = f"Extract physician: '{phys_cmd}'. Return JSON: {{'name': '...', 'max_hours': 40}}"
+        res = ai_command(p, api_key)
+        st.session_state.db["physicians"].append(res)
+        save_db(st.session_state.db)
+        st.success(f"Added {res['name']}")
+    
+    st.table(pd.DataFrame(st.session_state.db["physicians"]))
 
-            if st.button("Clear Rule History", type="secondary"):
-                st.session_state.db_state["admin_rules"] = []
-                save_data(st.session_state.db_state)
-                st.rerun()
+# TAB 3: RULES (DISTINCT FROM DATA)
+with tab3:
+    st.subheader("Assignment Rules")
+    rule_cmd = st.text_input("Add Rule (e.g., 'Dr. Jones avoids Night Shift')")
+    if st.button("Save Rule") and api_key:
+        # Rules are saved as plain text descriptions for the solver to read later
+        st.session_state.db["rules"].append({"rule": rule_cmd, "active": True})
+        save_db(st.session_state.db)
+        st.toast("Rule recorded")
 
-    # --- TAB 3: CALENDAR (Solver) ---
-    with t_calendar:
-        st.info("The logic from the Rule Ledger above will be applied automatically when you click generate.")
-        if st.button("🚀 Generate Schedule"):
-            st.success("Optimization running...")
-
-# Initialize
-admin_view()
+    st.data_editor(pd.DataFrame(st.session_state.db["rules"]))
