@@ -82,10 +82,17 @@ def parse_constraints(user_text, key, roster, shifts):
 def parse_config_updates(user_text, key):
     client = genai.Client(api_key=key)
     prompt = f"""
-    You are an AI database administrator. Extract table configuration additions.
-    Output JSON with an "updates" array containing objects of "type": "add_shift" or "add_physician".
-    For add_shift include: "Shift Name", "Start Time" (HH:MM string), "End Time" (HH:MM string), "Req Headcount" (integer).
-    For add_physician include: "Name", "Max Total" (integer), "Max Nights" (integer), "Max Weekends" (integer).
+    You are an AI database administrator. Extract table configuration additions AND modifications.
+    Output JSON with an "updates" array containing objects.
+    Allowed "type" values: "add_shift", "update_shift", "add_physician", "update_physician".
+    
+    For "add_shift" include: "Shift Name", "Start Time" (HH:MM string), "End Time" (HH:MM string), "Req Headcount" (integer).
+    For "update_shift" include: "Target Shift Name" (the exact current name of the shift to modify), and ONLY the fields being changed: "New Shift Name", "Start Time", "End Time", "Req Headcount".
+    
+    For "add_physician" include: "Name", "Max Total" (integer), "Max Nights" (integer), "Max Weekends" (integer).
+    For "update_physician" include: "Target Name" (the exact current name of the doctor), and ONLY the fields being changed: "New Name", "Max Total", "Max Nights", "Max Weekends".
+    
+    DO NOT generate IDs. The system will handle primary keys.
     Text: "{user_text}"
     """
     response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt, config={'response_mime_type': 'application/json'})
@@ -210,7 +217,7 @@ def admin_view():
             st.markdown("🤖 **AI Assistant: Configure Database via Text**")
             col_txt, col_btn = st.columns([4, 1])
             with col_txt:
-                ai_config_cmd = st.text_input("Instruction:", placeholder="E.g., 'Add a Swing Shift from 3pm to 11pm needing 2 headcount'")
+                ai_config_cmd = st.text_input("Instruction:", placeholder="E.g., 'Change the Day Shift to start at 08:00 and need 3 headcount'")
             with col_btn:
                 st.write("") 
                 if st.button("Update Database"):
@@ -224,15 +231,40 @@ def admin_view():
                                 current_doc_count = len(st.session_state.physicians_df)
                                 
                                 for item in parsed.get("updates", []):
+                                    # --- ADD LOGIC ---
                                     if item.get("type") == "add_shift":
                                         current_shift_count += 1
                                         new_shifts.append({"Task ID": f"TSK-{current_shift_count:02d}", "Shift Name": item.get("Shift Name", "New Shift"), "Start Time": datetime.datetime.strptime(item.get("Start Time", "00:00"), "%H:%M").time(), "End Time": datetime.datetime.strptime(item.get("End Time", "00:00"), "%H:%M").time(), "Req Headcount": item.get("Req Headcount", 1)})
                                     elif item.get("type") == "add_physician":
                                         current_doc_count += 1
                                         new_docs.append({"Provider ID": f"DOC-{current_doc_count:02d}", "Name": item.get("Name", "New Doc"), "Max Total": item.get("Max Total", 0), "Max Nights": item.get("Max Nights", 0), "Max Weekends": item.get("Max Weekends", 0)})
-                                
+                                    
+                                    # --- UPDATE LOGIC ---
+                                    elif item.get("type") == "update_shift":
+                                        target = item.get("Target Shift Name")
+                                        if target:
+                                            mask = st.session_state.shifts_df['Shift Name'].astype(str).str.lower() == str(target).lower()
+                                            if mask.any():
+                                                idx = st.session_state.shifts_df[mask].index[0]
+                                                if item.get("Start Time"): st.session_state.shifts_df.at[idx, "Start Time"] = datetime.datetime.strptime(item["Start Time"], "%H:%M").time()
+                                                if item.get("End Time"): st.session_state.shifts_df.at[idx, "End Time"] = datetime.datetime.strptime(item["End Time"], "%H:%M").time()
+                                                if item.get("Req Headcount") is not None: st.session_state.shifts_df.at[idx, "Req Headcount"] = int(item["Req Headcount"])
+                                                if item.get("New Shift Name"): st.session_state.shifts_df.at[idx, "Shift Name"] = item["New Shift Name"]
+                                                
+                                    elif item.get("type") == "update_physician":
+                                        target = item.get("Target Name")
+                                        if target:
+                                            mask = st.session_state.physicians_df['Name'].astype(str).str.lower() == str(target).lower()
+                                            if mask.any():
+                                                idx = st.session_state.physicians_df[mask].index[0]
+                                                if item.get("Max Total") is not None: st.session_state.physicians_df.at[idx, "Max Total"] = int(item["Max Total"])
+                                                if item.get("Max Nights") is not None: st.session_state.physicians_df.at[idx, "Max Nights"] = int(item["Max Nights"])
+                                                if item.get("Max Weekends") is not None: st.session_state.physicians_df.at[idx, "Max Weekends"] = int(item["Max Weekends"])
+                                                if item.get("New Name"): st.session_state.physicians_df.at[idx, "Name"] = item["New Name"]
+
                                 if new_shifts: st.session_state.shifts_df = pd.concat([st.session_state.shifts_df, pd.DataFrame(new_shifts)], ignore_index=True)
                                 if new_docs: st.session_state.physicians_df = pd.concat([st.session_state.physicians_df, pd.DataFrame(new_docs)], ignore_index=True)
+                                st.toast("Database updated successfully!", icon="✅")
                                 st.rerun()
                             except Exception as e: st.error(f"Failed. Error: {e}")
 
@@ -425,10 +457,7 @@ def admin_view():
         if st.session_state.db_state["saved_schedule"]:
             df = pd.DataFrame(st.session_state.db_state["saved_schedule"])
             
-            # --- NEW: VISUAL CALENDAR GENERATOR ---
             st.markdown("#### 🗓️ Visual Calendar Grid")
-            
-            # Styling colors for shift pills
             bg_colors = ["#e0f2fe", "#fce7f3", "#dcfce3", "#fef9c3", "#f3e8ff", "#ffedd5"]
             text_colors = ["#0369a1", "#be185d", "#15803d", "#a16207", "#7e22ce", "#c2410c"]
             
@@ -437,10 +466,9 @@ def admin_view():
             for i, day_name in enumerate(days_of_week):
                 header_cols[i].markdown(f"**{day_name}**")
                 
-            start_weekday = master_start_date.weekday() # 0 = Mon, 6 = Sun
+            start_weekday = master_start_date.weekday()
             week_cols = st.columns(7)
             
-            # Create empty offset boxes for the first row
             for i in range(start_weekday):
                 with week_cols[i]: st.write("")
                     
@@ -456,7 +484,6 @@ def admin_view():
                                 b_col = bg_colors[s_idx % len(bg_colors)]
                                 t_col = text_colors[s_idx % len(text_colors)]
                                 
-                                # Turn unassigned gaps bright red
                                 if "⚠️ UNASSIGNED GAP" in docs:
                                     b_col = "#fee2e2"
                                     t_col = "#b91c1c"
@@ -468,7 +495,7 @@ def admin_view():
                                 """, unsafe_allow_html=True)
                 
                 col_idx += 1
-                if col_idx == 7: # Wrap to the next week
+                if col_idx == 7: 
                     col_idx = 0
                     week_cols = st.columns(7)
 
