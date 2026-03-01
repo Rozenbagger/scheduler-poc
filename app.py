@@ -13,8 +13,12 @@ DB_FILE = "local_database.json"
 
 def load_data():
     if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r") as f:
-            return json.load(f)
+        try:
+            with open(DB_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            # If the file got corrupted, ignore it and start fresh
+            return {"global_unavail": [], "saved_schedule": None}
     return {"global_unavail": [], "saved_schedule": None}
 
 def save_data(data):
