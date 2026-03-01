@@ -3,12 +3,11 @@ import pandas as pd
 from google import genai
 import json
 import datetime
-from ortools.sat.python import cp_model
 
-# --- 1. SETTINGS & UI CONFIG ---
-st.set_page_config(page_title="Medical Scheduler v17.1", page_icon="🏥", layout="wide")
+# --- 1. CORE SETTINGS ---
+st.set_page_config(page_title="Medical Scheduler v14", page_icon="🏥", layout="wide")
 
-# Initialize Session State for Dataframes
+# Initialize Session State (The "Live" Database)
 if "shifts_df" not in st.session_state:
     st.session_state.shifts_df = pd.DataFrame([
         {"Shift Name": "Day Shift", "Start": "07:00", "End": "15:00", "Count": 2},
@@ -21,86 +20,96 @@ if "physicians_df" not in st.session_state:
         {"Name": "Dr. Jones", "Max Shifts": 20}
     ])
 
-# Force-refresh key for data editors
-if "widget_sync" not in st.session_state:
-    st.session_state.widget_sync = 0
+# Helper to force-refresh the data editors
+if "sync_key" not in st.session_state:
+    st.session_state.sync_key = 0
 
-# --- 2. SIDEBAR TOOLS (RESTORED) ---
+# --- 2. THE SIDEBAR (CORE CAPABILITIES) ---
 with st.sidebar:
-    st.header("📅 Timeline & Constraints")
+    st.header("📅 Timeline Settings")
     
-    # 1. Calendar Start Tool
+    # Restored Core Tools
     start_date = st.date_input("Schedule Start Date", datetime.date.today())
-    
-    # 2. Duration Tool
-    num_days = st.slider("Schedule Duration (Days)", 7, 60, 30)
-    
-    # 3. Rest Days/Hours Tool
-    min_rest = st.number_input("Min. Rest Hours between shifts", 0, 48, 12)
+    num_days = st.slider("Total Days to Schedule", 7, 90, 30)
+    min_rest = st.number_input("Min. Rest Hours", 0, 48, 12)
     
     st.divider()
     api_key = st.text_input("Gemini API Key:", type="password")
     
-    if st.button("Reset Session"):
+    if st.button("Factory Reset"):
         st.session_state.clear()
         st.rerun()
 
-# --- 3. AI CORE (GEMINI 2.5 FLASH) ---
-def run_ai_command(user_input, api_key):
-    client = genai.Client(api_key=api_key)
+# --- 3. AI COMMAND LOGIC (v14 STYLE) ---
+def process_ai_request(text, key):
+    client = genai.Client(api_key=key)
+    # The prompt is strictly limited to data extraction
     prompt = f"""
-    Update the schedule data based on: "{user_input}"
-    Return ONLY a JSON object:
+    Based on the input: "{text}", identify if the user wants to add a SHIFT or a PHYSICIAN.
+    Return ONLY JSON:
     {{
-      "action": "add_shift" OR "add_physician",
-      "data": {{ 
+      "target": "shift" or "physician",
+      "payload": {{
         "Shift Name": "...", "Start": "HH:MM", "End": "HH:MM", "Count": 1,
         "Name": "...", "Max Shifts": 20
       }}
     }}
     """
     response = client.models.generate_content(
-        model='gemini-2.5-flash',
+        model='gemini-2.0-flash', # Using 2.0 for v14-style speed/reliability
         contents=prompt,
         config={'response_mime_type': 'application/json'}
     )
     return json.loads(response.text)
 
-# --- 4. ADMIN INTERFACE ---
-st.title("🏥 Medical Scheduler")
+# --- 4. MAIN INTERFACE ---
+st.title("🏥 Medical Scheduler (v14)")
 
-# AI COMMAND BAR
-st.subheader("🤖 AI Data Entry")
-cmd_text = st.text_input("Add a shift or physician:", placeholder="e.g. 'Add Dr. Patel with max 15 shifts'")
+# The "Simple" Entry Field
+st.markdown("### 🤖 Quick Add")
+user_cmd = st.text_input("Enter command:", placeholder="e.g. 'Add Dr. Patel max 15 shifts' or 'Add Swing shift 15:00 to 23:00'")
 
-if st.button("Execute") and api_key:
+if st.button("Apply to Tables") and api_key:
     try:
-        result = run_ai_command(cmd_text, api_key)
-        data = result.get("data", {})
+        res = process_ai_request(user_cmd, api_key)
+        payload = res.get("payload", {})
         
-        if result["action"] == "add_shift":
-            new_row = pd.DataFrame([data])
+        if res["target"] == "shift":
+            new_row = pd.DataFrame([{k: payload.get(k) for k in ["Shift Name", "Start", "End", "Count"]}])
             st.session_state.shifts_df = pd.concat([st.session_state.shifts_df, new_row], ignore_index=True)
-        
-        elif result["action"] == "add_physician":
-            new_row = pd.DataFrame([data])
+        elif res["target"] == "physician":
+            new_row = pd.DataFrame([{k: payload.get(k) for k in ["Name", "Max Shifts"]}])
             st.session_state.physicians_df = pd.concat([st.session_state.physicians_df, new_row], ignore_index=True)
-            
-        st.session_state.widget_sync += 1
+        
+        st.session_state.sync_key += 1 # Forces UI refresh
+        st.success("Updated!")
         st.rerun()
     except Exception as e:
-        st.error(f"AI Error: {e}")
+        st.error(f"Could not process: {e}")
 
-# DATA TABLES
-col1, col2 = st.columns(2)
-with col1:
-    st.write("### 🕒 Shifts")
-    st.session_state.shifts_df = st.data_editor(st.session_state.shifts_df, key=f"s_{st.session_state.widget_sync}", hide_index=True, num_rows="dynamic")
+# DISPLAY DATA
+st.divider()
+c1, c2 = st.columns(2)
 
-with col2:
-    st.write("### 👨‍⚕️ Physicians")
-    st.session_state.physicians_df = st.data_editor(st.session_state.physicians_df, key=f"p_{st.session_state.widget_sync}", hide_index=True, num_rows="dynamic")
+with c1:
+    st.subheader("🕒 Shifts")
+    st.session_state.shifts_df = st.data_editor(
+        st.session_state.shifts_df, 
+        key=f"s_edit_{st.session_state.sync_key}", 
+        hide_index=True, 
+        num_rows="dynamic"
+    )
 
-# --- 5. GENERATION ---
-if st.button("🚀 Generate Schedule for " + str(num_days) + " Days", type="primary"):
-    st.success(f"Solver configured for {start_date} with {min_rest}h rest periods.")
+with c2:
+    st.subheader("👨‍⚕️ Physicians")
+    st.session_state.physicians_df = st.data_editor(
+        st.session_state.physicians_df, 
+        key=f"p_edit_{st.session_state.sync_key}", 
+        hide_index=True, 
+        num_rows="dynamic"
+    )
+
+# --- 5. THE SOLVER BUTTON ---
+st.divider()
+if st.button("🚀 Calculate Optimal Schedule", type="primary"):
+    st.write(f"Generating coverage from {start_date} for {num_days} days...")
