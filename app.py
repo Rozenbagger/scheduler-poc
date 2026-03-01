@@ -6,8 +6,8 @@ import datetime
 import os
 from ortools.sat.python import cp_model
 
-# --- 1. SYSTEM CONFIG & PERSISTENCE ---
-st.set_page_config(page_title="Shift Command Pro", page_icon="🏥", layout="wide")
+# --- 1. SETTINGS & PERSISTENCE ---
+st.set_page_config(page_title="Shift Command v25", page_icon="🏥", layout="wide")
 
 DB_FILE = "local_database.json"
 
@@ -23,11 +23,11 @@ def load_data():
         try:
             with open(DB_FILE, "r") as f:
                 data = json.load(f)
+                # Ensure all default keys exist
                 for k, v in default_state.items():
                     if k not in data: data[k] = v
                 return data
-        except Exception:
-            return default_state
+        except: return default_state
     return default_state
 
 def save_data(data):
@@ -37,100 +37,120 @@ def save_data(data):
 if "db_state" not in st.session_state:
     st.session_state.db_state = load_data()
 
-# Persistent Dataframes
+# Dataframe state for UI tables
 if "shifts_df" not in st.session_state:
     st.session_state.shifts_df = pd.DataFrame([
-        {"Task ID": "TSK-01", "Shift Name": "Day Shift", "Start Time": datetime.time(7, 0), "End Time": datetime.time(15, 0), "Req Headcount": 2},
-        {"Task ID": "TSK-02", "Shift Name": "Night Shift", "Start Time": datetime.time(23, 0), "End Time": datetime.time(7, 0), "Req Headcount": 1}
+        {"Task ID": "TSK-01", "Shift Name": "Day Shift", "Start Time": "07:00", "End Time": "15:00", "Req Headcount": 2},
+        {"Task ID": "TSK-02", "Shift Name": "Night Shift", "Start Time": "23:00", "End Time": "07:00", "Req Headcount": 1}
     ])
 
 if "physicians_df" not in st.session_state:
     st.session_state.physicians_df = pd.DataFrame([
-        {"Provider ID": "DOC-01", "Name": "Dr. Smith", "Max Total": 30, "Max Nights": 10, "Max Weekends": 10},
-        {"Provider ID": "DOC-02", "Name": "Dr. Jones", "Max Total": 30, "Max Nights": 10, "Max Weekends": 10},
-        {"Provider ID": "DOC-03", "Name": "Dr. Patel", "Max Total": 45, "Max Nights": 15, "Max Weekends": 15}
+        {"Provider ID": "DOC-01", "Name": "Dr. Smith", "Max Total": 30},
+        {"Provider ID": "DOC-02", "Name": "Dr. Jones", "Max Total": 30}
     ])
 
-# --- 2. AI REASONING (GEMINI 2.5 FLASH) ---
-def call_ai(prompt, key, schema_type="json"):
+# --- 2. THE AI REASONING ENGINE (Updated for SDK 2026) ---
+def call_ai_logic(prompt, key, is_json=True):
     client = genai.Client(api_key=key)
+    config = {"response_mime_type": "application/json"} if is_json else {}
+    
     response = client.models.generate_content(
-        model='gemini-2.5-flash', 
-        contents=prompt, 
-        config={'response_mime_type': 'application/json' if schema_type=="json" else 'text/plain'}
+        model='gemini-2.5-flash',
+        contents=prompt,
+        config=config
     )
-    return json.loads(response.text) if schema_type=="json" else response.text
+    return json.loads(response.text) if is_json else response.text
 
-# --- 3. ADMIN INTERFACE ---
+# --- 3. ADMIN DASHBOARD ---
 def admin_view():
     with st.sidebar:
-        st.header("⚙️ Configuration")
+        st.header("🔑 Authentication")
         api_key = st.text_input("Gemini API Key:", type="password")
-        start_dt = st.date_input("Schedule Start", datetime.datetime.strptime(st.session_state.db_state["start_date"], "%Y-%m-%d").date())
-        days = st.slider("Duration (Days)", 7, 60, st.session_state.db_state["num_days"])
+        st.divider()
+        st.info("System is running on Gemini 2.5 Flash for high-reasoning logic.")
+
+    st.title("Admin Dashboard")
+    tab_data, tab_rules, tab_calendar = st.tabs(["📊 Shift Management", "⚖️ Rule Ledger", "🗓️ Calendar"])
+
+    # --- TAB 1: DATA MANAGEMENT ---
+    with tab_data:
+        st.subheader("Shift & Roster Definitions")
         
-        # Save Sidebar Changes
-        if str(start_dt) != st.session_state.db_state["start_date"] or days != st.session_state.db_state["num_days"]:
-            st.session_state.db_state["start_date"] = str(start_dt)
-            st.session_state.db_state["num_days"] = days
-            save_data(st.session_state.db_state)
-
-    st.title("Admin Command Center")
-    t_data, t_rules, t_calendar = st.tabs(["📊 Data Management", "⚖️ Rule Ledger", "🗓️ Master Calendar"])
-
-    # TAB 1: DATA MANAGEMENT (Visible Entry Field)
-    with t_data:
-        st.subheader("Manage Shifts & Providers")
-        data_cmd = st.text_input("AI Data Command", placeholder="e.g. 'Add a Weekend Shift from 08:00 to 20:00 with 2 headcount'")
-        if st.button("Update Database") and api_key:
-            prompt = f"Extract database updates. Output JSON 'updates' array. Types: 'add_shift', 'add_physician'. Text: {data_cmd}"
+        # Direct Input Field for Data Changes
+        data_input = st.text_input("AI Data Command", placeholder="e.g. 'Add a Swing shift from 15:00 to 23:00 with 1 headcount'")
+        if st.button("Apply Data Update") and api_key:
+            prompt = f"""
+            Extract shift or physician additions from this text: '{data_input}'.
+            Return JSON object with 'updates' array. 
+            Example update: {{"type": "add_shift", "Shift Name": "Swing", "Start Time": "15:00", "End Time": "23:00", "Req Headcount": 1}}
+            """
             try:
-                res = call_ai(prompt, api_key)
+                res = call_ai_logic(prompt, api_key)
                 for item in res.get("updates", []):
                     if item["type"] == "add_shift":
-                        new_row = {"Task ID": f"TSK-{len(st.session_state.shifts_df)+1:02d}", "Shift Name": item["Shift Name"], "Start Time": datetime.datetime.strptime(item["Start Time"], "%H:%M").time(), "End Time": datetime.datetime.strptime(item["End Time"], "%H:%M").time(), "Req Headcount": int(item["Req Headcount"])}
+                        new_row = {
+                            "Task ID": f"TSK-{len(st.session_state.shifts_df)+1:02d}",
+                            "Shift Name": item["Shift Name"],
+                            "Start Time": item["Start Time"],
+                            "End Time": item["End Time"],
+                            "Req Headcount": int(item["Req Headcount"])
+                        }
                         st.session_state.shifts_df = pd.concat([st.session_state.shifts_df, pd.DataFrame([new_row])], ignore_index=True)
-                st.success("Database Updated!")
-            except: st.error("AI could not parse command.")
+                st.success("Shift added successfully!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"AI could not parse command: {e}")
 
         c1, c2 = st.columns(2)
-        with c1: st.session_state.shifts_df = st.data_editor(st.session_state.shifts_df, hide_index=True, num_rows="dynamic", key="edit_s")
-        with c2: st.session_state.physicians_df = st.data_editor(st.session_state.physicians_df, hide_index=True, num_rows="dynamic", key="edit_p")
+        with c1:
+            st.write("**Defined Shifts**")
+            st.session_state.shifts_df = st.data_editor(st.session_state.shifts_df, hide_index=True, num_rows="dynamic")
+        with c2:
+            st.write("**Provider Roster**")
+            st.session_state.physicians_df = st.data_editor(st.session_state.physicians_df, hide_index=True, num_rows="dynamic")
 
-    # TAB 2: RULE LEDGER (Visible Entry Field)
-    with t_rules:
-        st.subheader("Scheduling Logic Ledger")
-        rule_cmd = st.text_input("New Scheduling Rule", placeholder="e.g. 'Dr. Smith avoids Night Shifts'")
-        if st.button("Add Rule to Ledger") and api_key:
+    # --- TAB 2: RULE LEDGER ---
+    with tab_rules:
+        st.subheader("Active Scheduling Rules")
+        
+        # Direct Input Field for Rules
+        rule_input = st.text_input("AI Rule Command", placeholder="e.g. 'Dr. Smith avoids Night Shift'")
+        if st.button("Add to Ledger") and api_key:
             roster = list(st.session_state.physicians_df["Name"])
             shifts = list(st.session_state.shifts_df["Shift Name"])
-            prompt = f"Extract scheduling preferences. Roster: {roster}. Shifts: {shifts}. JSON array: [{{'physician_name': '...', 'constraint_type': 'soft_avoid_shift', 'target_shift': '...'}}]. Text: {rule_cmd}"
-            parsed = call_ai(prompt, api_key)
-            for p in parsed:
-                st.session_state.db_state["admin_rules"].append({"active": True, "description": rule_cmd, "logic": p})
-            save_data(st.session_state.db_state)
-            st.rerun()
+            prompt = f"""
+            Translate this rule: '{rule_input}'. 
+            Roster: {roster}. Shifts: {shifts}.
+            Return JSON array: [{{"physician_name": "...", "constraint_type": "soft_avoid_shift", "target_shift": "..."}}]
+            """
+            try:
+                parsed = call_ai_logic(prompt, api_key)
+                for p in parsed:
+                    st.session_state.db_state["admin_rules"].append({
+                        "active": True, 
+                        "description": rule_input, 
+                        "logic": p
+                    })
+                save_data(st.session_state.db_state)
+                st.rerun()
+            except: st.error("Rule could not be parsed.")
 
+        # The Ledger List
         if st.session_state.db_state["admin_rules"]:
             rules_df = pd.DataFrame(st.session_state.db_state["admin_rules"])
-            edited_rules = st.data_editor(rules_df[["active", "description"]], hide_index=True, use_container_width=True, key="edit_r")
-            if st.button("Sync Ledger"):
+            edited_rules = st.data_editor(rules_df[["active", "description"]], hide_index=True, use_container_width=True)
+            
+            if st.button("Save Ledger Changes"):
                 for i, row in edited_rules.iterrows():
                     st.session_state.db_state["admin_rules"][i]["active"] = row["active"]
                 save_data(st.session_state.db_state)
+                st.toast("Rules updated.")
 
-    # TAB 3: CALENDAR & SOLVER
-    with t_calendar:
-        if st.button("🚀 Run Scheduler", type="primary"):
-            # Solver initialization (Simplified for Turnkey)
-            st.info("Calculating optimal coverage...")
-            # [Physics Engine Logic from v22 integrated here]
-            # ...
-            st.success("Schedule Ready!")
+    # --- TAB 3: CALENDAR (Solver logic placeholder) ---
+    with tab_calendar:
+        if st.button("🚀 Generate Optimized Schedule"):
+            st.warning("Solver calculations would run here using current Rules and Data.")
 
-        if st.session_state.db_state["saved_schedule"]:
-            # Rendering calendar with Shift Times and Gap Recommendations
-            st.write("Visual Calendar Grid...")
-
-# --- ROUTER ---
+# Start App
 admin_view()
