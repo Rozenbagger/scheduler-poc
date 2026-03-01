@@ -23,14 +23,46 @@ st.markdown("""
 DB_FILE = "local_database.json"
 
 def load_data():
+    default_data = {
+        "global_unavail": [],
+        "saved_schedule": None,
+        "shifts": [
+            {"Task ID": "TSK-01", "Shift Name": "Day Shift", "Zone": "Main ER", "Start Time": "07:00", "End Time": "15:00", "Req Headcount": 2},
+            {"Task ID": "TSK-02", "Shift Name": "Night Shift", "Zone": "Main ER", "Start Time": "23:00", "End Time": "07:00", "Req Headcount": 1},
+            {"Task ID": "TSK-03", "Shift Name": "24h Sick Call", "Zone": "On Call", "Start Time": "07:00", "End Time": "07:00", "Req Headcount": 1}
+        ],
+        "physicians": [
+            {"Provider ID": "DOC-01", "Name": "Dr. Smith", "Max Total": 30, "Max Nights": 10, "Max Weekends": 10},
+            {"Provider ID": "DOC-02", "Name": "Dr. Jones", "Max Total": 30, "Max Nights": 10, "Max Weekends": 10},
+            {"Provider ID": "DOC-03", "Name": "Dr. Patel", "Max Total": 45, "Max Nights": 15, "Max Weekends": 15}
+        ],
+        "settings": {
+            "api_key": "",
+            "start_date": datetime.date.today().strftime("%Y-%m-%d"),
+            "end_date": (datetime.date.today() + datetime.timedelta(days=29)).strftime("%Y-%m-%d"),
+            "min_rest_hours": 12,
+            "carryover_docs": []
+        }
+    }
+    
     if os.path.exists(DB_FILE):
-        with open(DB_FILE, "r") as f:
-            data = json.load(f)
-            for req in data.get("global_unavail", []):
-                if "date" not in req:
-                    req["date"] = datetime.date.today().strftime("%Y-%m-%d")
-            return data
-    return {"global_unavail": [], "saved_schedule": None}
+        try:
+            with open(DB_FILE, "r") as f:
+                data = json.load(f)
+                for k, v in default_data.items():
+                    if k not in data:
+                        data[k] = v
+                    elif isinstance(v, dict):
+                        for sub_k, sub_v in v.items():
+                            if sub_k not in data[k]:
+                                data[k][sub_k] = sub_v
+                for req in data.get("global_unavail", []):
+                    if "date" not in req:
+                        req["date"] = datetime.date.today().strftime("%Y-%m-%d")
+                return data
+        except Exception:
+            pass
+    return default_data
 
 def save_data(data):
     with open(DB_FILE, "w") as f:
@@ -39,19 +71,25 @@ def save_data(data):
 if "db_state" not in st.session_state:
     st.session_state.db_state = load_data()
 
-# Initialize dynamic DataFrames for AI modifications
 if "shifts_df" not in st.session_state:
-    st.session_state.shifts_df = pd.DataFrame([
-        {"Task ID": "TSK-01", "Shift Name": "Day Shift", "Zone": "Main ER", "Start Time": datetime.time(7, 0), "End Time": datetime.time(15, 0), "Req Headcount": 2},
-        {"Task ID": "TSK-02", "Shift Name": "Night Shift", "Zone": "Main ER", "Start Time": datetime.time(23, 0), "End Time": datetime.time(7, 0), "Req Headcount": 1},
-        {"Task ID": "TSK-03", "Shift Name": "24h Sick Call", "Zone": "On Call", "Start Time": datetime.time(7, 0), "End Time": datetime.time(7, 0), "Req Headcount": 1}
-    ])
+    s_list = st.session_state.db_state["shifts"]
+    for s in s_list:
+        if isinstance(s.get("Start Time"), str):
+            s["Start Time"] = datetime.datetime.strptime(s["Start Time"], "%H:%M").time()
+        if isinstance(s.get("End Time"), str):
+            s["End Time"] = datetime.datetime.strptime(s["End Time"], "%H:%M").time()
+    st.session_state.shifts_df = pd.DataFrame(s_list)
+
 if "physicians_df" not in st.session_state:
-    st.session_state.physicians_df = pd.DataFrame([
-        {"Provider ID": "DOC-01", "Name": "Dr. Smith", "Max Total": 30, "Max Nights": 10, "Max Weekends": 10},
-        {"Provider ID": "DOC-02", "Name": "Dr. Jones", "Max Total": 30, "Max Nights": 10, "Max Weekends": 10},
-        {"Provider ID": "DOC-03", "Name": "Dr. Patel", "Max Total": 45, "Max Nights": 15, "Max Weekends": 15}
-    ])
+    st.session_state.physicians_df = pd.DataFrame(st.session_state.db_state["physicians"])
+
+def save_current_state():
+    s_df = st.session_state.shifts_df.copy()
+    s_df["Start Time"] = s_df["Start Time"].apply(lambda x: x.strftime("%H:%M") if pd.notnull(x) else "00:00")
+    s_df["End Time"] = s_df["End Time"].apply(lambda x: x.strftime("%H:%M") if pd.notnull(x) else "00:00")
+    st.session_state.db_state["shifts"] = s_df.to_dict(orient="records")
+    st.session_state.db_state["physicians"] = st.session_state.physicians_df.to_dict(orient="records")
+    save_data(st.session_state.db_state)
 
 # --- 2. POC USER DATABASE ---
 USER_DB = {
@@ -99,6 +137,27 @@ def parse_config_modifications(user_text, key, current_docs, current_shifts):
     response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
     return json.loads(response.text)
 
+# NEW: Physician Time-Off Parser
+def parse_time_off_requests(user_text, key, today_date):
+    client = genai.Client(api_key=key)
+    prompt = f"""
+    You are a scheduling assistant. Extract time-off requests from the user's text.
+    Today's date is {today_date}. Use this to resolve relative dates like "tomorrow" or "next Friday".
+    If the user requests an entire day off, use start="00:00" and end="23:59".
+    Ensure times are strictly formatted as "HH:MM" in 24-hour time.
+    Respond ONLY with a JSON array matching this schema:
+    [
+      {{
+        "date": "YYYY-MM-DD",
+        "start": "HH:MM",
+        "end": "HH:MM"
+      }}
+    ]
+    Text: "{user_text}"
+    """
+    response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
+    return json.loads(response.text)
+
 def times_overlap(s_start, s_end, u_start, u_end):
     if pd.isna(s_start) or pd.isna(s_end) or pd.isna(u_start) or pd.isna(u_end): return False
     def to_mins(t): return t.hour * 60 + t.minute
@@ -107,7 +166,7 @@ def times_overlap(s_start, s_end, u_start, u_end):
     if ue <= us: ue += 24 * 60
     return max(ss, us) < min(se, ue)
 
-# --- VISUAL CALENDAR RENDERER (FIXED) ---
+# --- VISUAL CALENDAR RENDERER ---
 def render_calendar_view(saved_schedule):
     if not saved_schedule:
         st.info("No schedule has been generated yet.")
@@ -141,7 +200,6 @@ def render_calendar_view(saved_schedule):
                 doc_color = "#dc3545" if "⚠️" in docs else "#0056b3"
                 doc_weight = "bold" if "⚠️" in docs else "500"
 
-                # FIXED: Removed indentation from string to prevent Markdown code block triggering
                 html += f"<div style='background: #f8f9fa; border-left: 4px solid #007bff; padding: 6px 8px; margin-bottom: 8px; border-radius: 4px;'>"
                 html += f"<div style='font-weight: bold; color: #343a40; font-size: 0.9em; margin-bottom: 2px;'>{shift['Name']}</div>"
                 html += f"<div style='color: #6c757d; font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.5px;'>📍 {shift['Zone']}</div>"
@@ -199,22 +257,59 @@ def physician_view():
             st.info("No schedules have been published.")
 
     with tab2:
-        st.markdown("#### Submit Unavailable Hours")
-        default_unavail = pd.DataFrame([{"Date": datetime.date.today(), "Start Time": datetime.time(8, 0), "End Time": datetime.time(17, 0)}])
-        edited_unavail = st.data_editor(default_unavail, num_rows="dynamic", hide_index=True, use_container_width=True)
-        if st.button("Submit Time Off Request", type="primary"):
-            new_requests = []
-            for _, row in edited_unavail.iterrows():
-                if not pd.isna(row.get("Start Time")):
-                    new_requests.append({
-                        "physician": st.session_state.current_name,
-                        "date": row["Date"].strftime("%Y-%m-%d"),
-                        "start": row["Start Time"].strftime("%H:%M"),
-                        "end": row["End Time"].strftime("%H:%M")
-                    })
-            st.session_state.db_state["global_unavail"].extend(new_requests)
-            save_data(st.session_state.db_state)
-            st.toast("Time off successfully submitted!", icon="✅") 
+        col_ai, col_manual = st.columns([1.2, 1])
+        
+        with col_ai:
+            st.markdown("#### ✨ AI Time-Off Assistant")
+            ai_request = st.text_area("Tell Gemini when you need off:", placeholder="e.g., 'I have a dentist appointment on Friday from 1:00 PM to 3:00 PM, and I need all of next Monday off.'", height=115)
+            
+            if st.button("Submit Request via AI", type="primary", use_container_width=True):
+                api_key = st.session_state.db_state["settings"].get("api_key", "")
+                if not api_key:
+                    st.error("System AI is currently disabled. Please contact your Administrator to configure the API key.")
+                else:
+                    with st.spinner("Gemini is processing your request..."):
+                        try:
+                            today_str = datetime.date.today().strftime("%Y-%m-%d")
+                            parsed_reqs = parse_time_off_requests(ai_request, api_key, today_str)
+                            
+                            for req in parsed_reqs:
+                                req["physician"] = st.session_state.current_name
+                                st.session_state.db_state["global_unavail"].append(req)
+                            
+                            save_data(st.session_state.db_state)
+                            st.toast("Time off successfully submitted via AI!", icon="✅")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"AI parsing failed. Please try manual entry. ({e})")
+        
+        with col_manual:
+            st.markdown("#### ✍️ Manual Fallback")
+            st.markdown("Use this grid if you prefer to enter specific dates manually.")
+            default_unavail = pd.DataFrame([{"Date": datetime.date.today(), "Start Time": datetime.time(8, 0), "End Time": datetime.time(17, 0)}])
+            edited_unavail = st.data_editor(default_unavail, num_rows="dynamic", hide_index=True, use_container_width=True)
+            if st.button("Submit Manual Entry", use_container_width=True):
+                new_requests = []
+                for _, row in edited_unavail.iterrows():
+                    if not pd.isna(row.get("Start Time")):
+                        new_requests.append({
+                            "physician": st.session_state.current_name,
+                            "date": row["Date"].strftime("%Y-%m-%d"),
+                            "start": row["Start Time"].strftime("%H:%M"),
+                            "end": row["End Time"].strftime("%H:%M")
+                        })
+                st.session_state.db_state["global_unavail"].extend(new_requests)
+                save_data(st.session_state.db_state)
+                st.toast("Time off saved!", icon="✅")
+                st.rerun()
+                
+        st.divider()
+        st.markdown("#### 📋 Your Pending Requests")
+        my_reqs = [r for r in st.session_state.db_state["global_unavail"] if r["physician"] == st.session_state.current_name]
+        if my_reqs:
+            st.dataframe(pd.DataFrame(my_reqs).drop(columns=["physician"]), use_container_width=True)
+        else:
+            st.info("You have no pending time-off requests.")
 
 # --- 6. ADMIN PORTAL ---
 def admin_view():
@@ -226,10 +321,15 @@ def admin_view():
         st.divider()
         
         st.markdown("### ⚙️ Global Parameters")
-        api_key = st.text_input("Gemini API Key:", type="password", help="Required for natural language parsing.")
+        s_config = st.session_state.db_state["settings"]
         
-        schedule_start_date = st.date_input("Schedule Start Date", datetime.date.today())
-        schedule_end_date = st.date_input("Schedule End Date", datetime.date.today() + datetime.timedelta(days=29))
+        api_key = st.text_input("Gemini API Key:", value=s_config["api_key"], type="password", help="Required for natural language parsing.")
+        
+        sd_val = datetime.datetime.strptime(s_config["start_date"], "%Y-%m-%d").date()
+        ed_val = datetime.datetime.strptime(s_config["end_date"], "%Y-%m-%d").date()
+        
+        schedule_start_date = st.date_input("Schedule Start Date", value=sd_val)
+        schedule_end_date = st.date_input("Schedule End Date", value=ed_val)
         
         if schedule_end_date < schedule_start_date:
             st.error("End date must be after start date.")
@@ -237,7 +337,7 @@ def admin_view():
             
         num_days = (schedule_end_date - schedule_start_date).days + 1
         day_offset = schedule_start_date.weekday() 
-        min_rest_hours = st.number_input("Mandatory Rest (Hrs)", 0, 48, 12)
+        min_rest_hours = st.number_input("Mandatory Rest (Hrs)", 0, 48, value=s_config["min_rest_hours"])
 
     st.header("Admin Command Center")
     tab_config, tab_engine, tab_master = st.tabs(["👥 1. Staff & Shifts", "🧠 2. AI Engine", "📅 3. Master Calendar & Export"])
@@ -283,6 +383,7 @@ def admin_view():
                                     existing_nums = [int(x.split('-')[1]) for x in st.session_state.shifts_df["Task ID"] if '-' in str(x) and str(x).split('-')[1].isdigit()]
                                     s["Task ID"] = f"TSK-{(max(existing_nums) + 1 if existing_nums else 1):02d}"
                                     st.session_state.shifts_df = pd.concat([st.session_state.shifts_df, pd.DataFrame([s])], ignore_index=True)
+                        save_current_state()
                         st.rerun()
         st.divider()
 
@@ -297,7 +398,9 @@ def admin_view():
                     edited_shifts.at[idx, "Task ID"] = f"TSK-{(max(existing) + 1 if existing else 1):02d}"
                     needs_update = True
             st.session_state.shifts_df = edited_shifts
-            if needs_update: st.rerun()
+            if needs_update: 
+                save_current_state()
+                st.rerun()
 
         with col_docs:
             st.markdown("#### Provider Contracts")
@@ -309,11 +412,22 @@ def admin_view():
                     edited_docs.at[idx, "Provider ID"] = f"DOC-{(max(existing) + 1 if existing else 1):02d}"
                     needs_update_docs = True
             st.session_state.physicians_df = edited_docs
-            if needs_update_docs: st.rerun()
+            if needs_update_docs: 
+                save_current_state()
+                st.rerun()
 
         st.divider()
         physicians_list = [r["Name"] for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")]
-        carryover_docs = st.multiselect("Select providers who worked the final overnight shift of the previous period:", physicians_list)
+        valid_carryover = [d for d in s_config["carryover_docs"] if d in physicians_list]
+        carryover_docs = st.multiselect("Select providers who worked the final overnight shift of the previous period:", physicians_list, default=valid_carryover)
+
+    st.session_state.db_state["settings"].update({
+        "api_key": api_key,
+        "start_date": schedule_start_date.strftime("%Y-%m-%d"),
+        "end_date": schedule_end_date.strftime("%Y-%m-%d"),
+        "min_rest_hours": min_rest_hours,
+        "carryover_docs": carryover_docs
+    })
 
     shift_reqs = {r["Shift Name"]: int(r["Req Headcount"]) for _, r in st.session_state.shifts_df.iterrows() if r.get("Shift Name")}
     shift_times = {r["Shift Name"]: {"start": r["Start Time"], "end": r["End Time"]} for _, r in st.session_state.shifts_df.iterrows() if r.get("Shift Name")}
@@ -346,9 +460,10 @@ def admin_view():
 
         with col_ai:
             st.markdown("#### AI Natural Language Rules")
-            user_req = st.text_area("Input custom overrides or soft preferences:", f"Dr. Patel prefers Day Shifts. Dr. Jones needs {schedule_start_date.strftime('%Y-%m-%d')} off.", height=150)
+            user_req = st.text_area("Input custom overrides or soft preferences:", f"Dr. Patel prefers Day Shifts.", height=150)
             
             if st.button("🚀 Generate Optimal Schedule", type="primary", use_container_width=True):
+                save_current_state()
                 if not api_key: 
                     st.error("API Key required in sidebar.")
                     st.stop()
@@ -494,6 +609,8 @@ def admin_view():
                         })
             
             st.download_button("📥 Download QGenda / Amion CSV Payload", pd.DataFrame(flat).to_csv(index=False).encode('utf-8'), 'enterprise_export.csv', 'text/csv', type="secondary")
+
+    save_current_state()
 
 # --- 7. ROUTER ---
 if not st.session_state.logged_in: login_screen()
