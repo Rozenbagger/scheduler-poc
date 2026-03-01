@@ -18,7 +18,7 @@ st.markdown("""
     .stDataFrame { border-radius: 12px; overflow: hidden; }
     [data-testid="stMetricValue"] { font-size: 24px; color: #007bff; }
     </style>
-    """, unsafe_allow_stdio=True)
+    """, unsafe_allow_html=True)
 
 DB_FILE = "local_database.json"
 
