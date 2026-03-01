@@ -32,9 +32,9 @@ def load_data():
             {"Task ID": "TSK-03", "Shift Name": "24h Sick Call", "Zone": "On Call", "Start Time": "07:00", "End Time": "07:00", "Req Headcount": 1}
         ],
         "physicians": [
-            {"Provider ID": "DOC-01", "Name": "Dr. Smith", "Max Total": 30, "Max Nights": 10, "Max Weekends": 10},
-            {"Provider ID": "DOC-02", "Name": "Dr. Jones", "Max Total": 30, "Max Nights": 10, "Max Weekends": 10},
-            {"Provider ID": "DOC-03", "Name": "Dr. Patel", "Max Total": 45, "Max Nights": 15, "Max Weekends": 15}
+            {"Provider ID": "DOC-01", "Name": "Dr. Smith", "Min Total": 10, "Max Total": 30, "Min Nights": 2, "Max Nights": 10, "Min Weekends": 2, "Max Weekends": 10},
+            {"Provider ID": "DOC-02", "Name": "Dr. Jones", "Min Total": 10, "Max Total": 30, "Min Nights": 2, "Max Nights": 10, "Min Weekends": 2, "Max Weekends": 10},
+            {"Provider ID": "DOC-03", "Name": "Dr. Patel", "Min Total": 15, "Max Total": 45, "Min Nights": 4, "Max Nights": 15, "Min Weekends": 4, "Max Weekends": 15}
         ],
         "settings": {
             "api_key": "",
@@ -56,9 +56,14 @@ def load_data():
                         for sub_k, sub_v in v.items():
                             if sub_k not in data[k]:
                                 data[k][sub_k] = sub_v
+                # Legacy upgrades for older saved JSONs
                 for req in data.get("global_unavail", []):
                     if "date" not in req:
                         req["date"] = datetime.date.today().strftime("%Y-%m-%d")
+                for doc in data.get("physicians", []):
+                    if "Min Total" not in doc: doc["Min Total"] = 0
+                    if "Min Nights" not in doc: doc["Min Nights"] = 0
+                    if "Min Weekends" not in doc: doc["Min Weekends"] = 0
                 return data
         except Exception:
             pass
@@ -129,7 +134,7 @@ def parse_config_modifications(user_text, key, current_docs, current_shifts):
     
     Respond ONLY with a JSON matching this schema:
     {{
-      "upsert_physicians": [{{ "Provider ID": "optional existing ID", "Name": "...", "Max Total": int, "Max Nights": int, "Max Weekends": int }}],
+      "upsert_physicians": [{{ "Provider ID": "optional existing ID", "Name": "...", "Min Total": int, "Max Total": int, "Min Nights": int, "Max Nights": int, "Min Weekends": int, "Max Weekends": int }}],
       "upsert_shifts": [{{ "Task ID": "optional existing ID", "Shift Name": "...", "Zone": "...", "Start Time": "HH:MM", "End Time": "HH:MM", "Req Headcount": int }}]
     }}
     Text: "{user_text}"
@@ -137,7 +142,6 @@ def parse_config_modifications(user_text, key, current_docs, current_shifts):
     response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
     return json.loads(response.text)
 
-# NEW: Physician Time-Off Parser
 def parse_time_off_requests(user_text, key, today_date):
     client = genai.Client(api_key=key)
     prompt = f"""
@@ -346,7 +350,7 @@ def admin_view():
         st.markdown("#### ✨ AI Configuration Assistant")
         col_config, col_btn = st.columns([4, 1])
         with col_config:
-            config_prompt = st.text_input("Ask AI to add or edit physicians/shifts:", placeholder="e.g., 'Update Dr. Smith to max 40 shifts. Add a 12h Fast-Track shift in the Triage Zone.'", label_visibility="collapsed")
+            config_prompt = st.text_input("Ask AI to add or edit physicians/shifts:", placeholder="e.g., 'Update Dr. Smith to min 10 nights and max 40 total. Add a 12h Fast-Track shift in Triage Zone.'", label_visibility="collapsed")
         with col_btn:
             if st.button("Modify Models", use_container_width=True):
                 if not api_key: 
@@ -387,34 +391,31 @@ def admin_view():
                         st.rerun()
         st.divider()
 
-        col_shifts, col_docs = st.columns([1.5, 1])
-        with col_shifts:
-            st.markdown("#### Shift Definitions & Zones")
-            edited_shifts = st.data_editor(st.session_state.shifts_df, num_rows="dynamic", hide_index=True, use_container_width=True, disabled=["Task ID"])
-            needs_update = False
-            for idx, row in edited_shifts.iterrows():
-                if pd.isna(row["Task ID"]) or str(row["Task ID"]).strip() == "":
-                    existing = [int(x.split('-')[1]) for x in edited_shifts["Task ID"].dropna() if '-' in str(x) and str(x).split('-')[1].isdigit()]
-                    edited_shifts.at[idx, "Task ID"] = f"TSK-{(max(existing) + 1 if existing else 1):02d}"
-                    needs_update = True
-            st.session_state.shifts_df = edited_shifts
-            if needs_update: 
-                save_current_state()
-                st.rerun()
+        st.markdown("#### Provider Contracts (Min/Max Rules)")
+        edited_docs = st.data_editor(st.session_state.physicians_df, num_rows="dynamic", hide_index=True, use_container_width=True, disabled=["Provider ID"])
+        needs_update_docs = False
+        for idx, row in edited_docs.iterrows():
+            if pd.isna(row["Provider ID"]) or str(row["Provider ID"]).strip() == "":
+                existing = [int(x.split('-')[1]) for x in edited_docs["Provider ID"].dropna() if '-' in str(x) and str(x).split('-')[1].isdigit()]
+                edited_docs.at[idx, "Provider ID"] = f"DOC-{(max(existing) + 1 if existing else 1):02d}"
+                needs_update_docs = True
+        st.session_state.physicians_df = edited_docs
+        if needs_update_docs: 
+            save_current_state()
+            st.rerun()
 
-        with col_docs:
-            st.markdown("#### Provider Contracts")
-            edited_docs = st.data_editor(st.session_state.physicians_df, num_rows="dynamic", hide_index=True, use_container_width=True, disabled=["Provider ID"])
-            needs_update_docs = False
-            for idx, row in edited_docs.iterrows():
-                if pd.isna(row["Provider ID"]) or str(row["Provider ID"]).strip() == "":
-                    existing = [int(x.split('-')[1]) for x in edited_docs["Provider ID"].dropna() if '-' in str(x) and str(x).split('-')[1].isdigit()]
-                    edited_docs.at[idx, "Provider ID"] = f"DOC-{(max(existing) + 1 if existing else 1):02d}"
-                    needs_update_docs = True
-            st.session_state.physicians_df = edited_docs
-            if needs_update_docs: 
-                save_current_state()
-                st.rerun()
+        st.markdown("#### Shift Definitions & Zones")
+        edited_shifts = st.data_editor(st.session_state.shifts_df, num_rows="dynamic", hide_index=True, use_container_width=True, disabled=["Task ID"])
+        needs_update = False
+        for idx, row in edited_shifts.iterrows():
+            if pd.isna(row["Task ID"]) or str(row["Task ID"]).strip() == "":
+                existing = [int(x.split('-')[1]) for x in edited_shifts["Task ID"].dropna() if '-' in str(x) and str(x).split('-')[1].isdigit()]
+                edited_shifts.at[idx, "Task ID"] = f"TSK-{(max(existing) + 1 if existing else 1):02d}"
+                needs_update = True
+        st.session_state.shifts_df = edited_shifts
+        if needs_update: 
+            save_current_state()
+            st.rerun()
 
         st.divider()
         physicians_list = [r["Name"] for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")]
@@ -429,15 +430,23 @@ def admin_view():
         "carryover_docs": carryover_docs
     })
 
+    # Dictionaries for solver bounds
     shift_reqs = {r["Shift Name"]: int(r["Req Headcount"]) for _, r in st.session_state.shifts_df.iterrows() if r.get("Shift Name")}
     shift_times = {r["Shift Name"]: {"start": r["Start Time"], "end": r["End Time"]} for _, r in st.session_state.shifts_df.iterrows() if r.get("Shift Name")}
     shift_zones = {r["Shift Name"]: r.get("Zone", "Unspecified") for _, r in st.session_state.shifts_df.iterrows() if r.get("Shift Name")}
     shift_ids = {r["Shift Name"]: r["Task ID"] for _, r in st.session_state.shifts_df.iterrows() if r.get("Shift Name")}
     shifts_list = list(shift_reqs.keys())
 
+    # Max Limits
     p_limits = {r["Name"]: int(r["Max Total"]) for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")}
     n_limits = {r["Name"]: int(r["Max Nights"]) for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")}
     w_limits = {r["Name"]: int(r["Max Weekends"]) for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")}
+    
+    # Min Limits
+    p_min_limits = {r["Name"]: int(r.get("Min Total", 0)) for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")}
+    n_min_limits = {r["Name"]: int(r.get("Min Nights", 0)) for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")}
+    w_min_limits = {r["Name"]: int(r.get("Min Weekends", 0)) for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")}
+    
     p_ids = {r["Name"]: r["Provider ID"] for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")}
 
     weekend_days = [d for d in range(num_days) if (d + day_offset) % 7 in [5, 6]]
@@ -489,24 +498,45 @@ def admin_view():
 
                     st.write(f"Running OR-Tools Mathematical Optimization for {num_days} days...")
                     internal_physicians = physicians_list + ["⚠️ UNASSIGNED GAP"]
+                    
+                    # Setup Max Limits
                     i_limits, i_n_limits, i_w_limits = p_limits.copy(), n_limits.copy(), w_limits.copy()
                     i_limits["⚠️ UNASSIGNED GAP"] = i_n_limits["⚠️ UNASSIGNED GAP"] = i_w_limits["⚠️ UNASSIGNED GAP"] = 999 
+                    
+                    # Setup Min Limits (Ghost doctor has minimum of 0)
+                    i_min_limits, i_n_min_limits, i_w_min_limits = p_min_limits.copy(), n_min_limits.copy(), w_min_limits.copy()
+                    i_min_limits["⚠️ UNASSIGNED GAP"] = i_n_min_limits["⚠️ UNASSIGNED GAP"] = i_w_min_limits["⚠️ UNASSIGNED GAP"] = 0
+
                     ghost_idx = len(internal_physicians) - 1
 
                     model = cp_model.CpModel()
                     shifts = {(p, d, s): model.NewBoolVar(f's_{p}_{d}_{s}') for p in range(len(internal_physicians)) for d in range(num_days) for s in range(len(shifts_list))}
                     obj_terms = [] 
                     
+                    # 1. Headcount per shift
                     for d in range(num_days):
                         for s, s_name in enumerate(shifts_list):
                             model.Add(sum(shifts[(p, d, s)] for p in range(len(internal_physicians))) == shift_reqs[s_name])
 
+                    # 2. Limits Constraints (Max AND Min)
                     for p in range(len(internal_physicians)):
                         for d in range(num_days): model.AddAtMostOne(shifts[(p, d, s)] for s in range(len(shifts_list)))
+                        
+                        # Total Shift Bounds
                         model.Add(sum(shifts[(p, d, s)] for d in range(num_days) for s in range(len(shifts_list))) <= i_limits[internal_physicians[p]])
-                        if night_idx: model.Add(sum(shifts[(p, d, s)] for d in range(num_days) for s in night_idx) <= i_n_limits[internal_physicians[p]])
-                        if weekend_days: model.Add(sum(shifts[(p, d, s)] for d in weekend_days for s in range(len(shifts_list))) <= i_w_limits[internal_physicians[p]])
+                        model.Add(sum(shifts[(p, d, s)] for d in range(num_days) for s in range(len(shifts_list))) >= i_min_limits[internal_physicians[p]])
+                        
+                        # Night Shift Bounds
+                        if night_idx: 
+                            model.Add(sum(shifts[(p, d, s)] for d in range(num_days) for s in night_idx) <= i_n_limits[internal_physicians[p]])
+                            model.Add(sum(shifts[(p, d, s)] for d in range(num_days) for s in night_idx) >= i_n_min_limits[internal_physicians[p]])
+                        
+                        # Weekend Shift Bounds
+                        if weekend_days: 
+                            model.Add(sum(shifts[(p, d, s)] for d in weekend_days for s in range(len(shifts_list))) <= i_w_limits[internal_physicians[p]])
+                            model.Add(sum(shifts[(p, d, s)] for d in weekend_days for s in range(len(shifts_list))) >= i_w_min_limits[internal_physicians[p]])
 
+                    # 3. Boundary Carryover Constraints
                     for doc_name in carryover_docs:
                         if doc_name in internal_physicians:
                             p = internal_physicians.index(doc_name)
@@ -515,6 +545,7 @@ def admin_view():
                                 if (t_start.hour * 60 + t_start.minute) < (min_rest_hours * 60):
                                     model.Add(shifts[(p, 0, s)] == 0)
 
+                    # 4. Intra-Schedule Rest Periods
                     shift_ints = {}
                     for d in range(num_days):
                         for s, s_name in enumerate(shifts_list):
@@ -534,6 +565,7 @@ def admin_view():
                                 if gap < min_rest_hours * 60:
                                     model.Add(shifts[(p, d1, s1)] + shifts[(p, d2, s2)] <= 1)
 
+                    # 5. Apply AI Parsed Rules (Time off, Preferences)
                     for r in rules:
                         if r.get("physician_name") not in physicians_list: continue 
                         p = internal_physicians.index(r["physician_name"])
@@ -557,6 +589,7 @@ def admin_view():
                             for d in ([t_d] if t_d is not None else range(num_days)):
                                 if 0 <= d < num_days: obj_terms.append(shifts[(p, d, t_s)] * -10)
 
+                    # 6. Ghost Doctor Penalty (Keep gaps as low as mathematically possible)
                     for d in range(num_days):
                         for s in range(len(shifts_list)): obj_terms.append(shifts[(ghost_idx, d, s)] * -10000)
 
@@ -587,7 +620,7 @@ def admin_view():
                         st.toast("New schedule published to Master view.", icon="🎉")
                     else: 
                         status.update(label="Infeasible Ruleset", state="error")
-                        st.error("Solver failed. The combination of constraints and time off requested is mathematically impossible.")
+                        st.error("🚨 Solver Failed: INFEASIBLE. Your minimum shift requirements or time-off requests are mathematically impossible to satisfy. Please lower the minimums or increase the maximums in the Provider Contracts table.")
 
     with tab_master:
         render_calendar_view(st.session_state.db_state.get("saved_schedule"))
