@@ -128,7 +128,8 @@ def login_screen():
         with st.form("login_form", clear_on_submit=True):
             username = st.text_input("Username").lower()
             password = st.text_input("Password", type="password")
-            if st.form_submit_button("Authenticate", use_container_width=True):
+            # Removed the dead layout parameter
+            if st.form_submit_button("Authenticate"):
                 if username in USER_DB and USER_DB[username]["password"] == password:
                     st.session_state.logged_in = True
                     st.session_state.current_role = USER_DB[username]["role"]
@@ -142,7 +143,7 @@ def physician_view():
     with st.sidebar:
         st.success(f"Logged in as **{st.session_state.current_name}**")
         api_key = st.text_input("Gemini API Key:", type="password", help="Enable AI features")
-        if st.button("Log Out", use_container_width=True):
+        if st.button("Log Out"):
             st.session_state.logged_in = False
             st.rerun()
             
@@ -154,7 +155,7 @@ def physician_view():
         if st.session_state.db_state["saved_schedule"]:
             df = pd.DataFrame(st.session_state.db_state["saved_schedule"])
             mask = df.apply(lambda row: row.astype(str).str.contains(st.session_state.current_name).any(), axis=1)
-            st.dataframe(df[mask].drop(columns=['Day_Index'], errors='ignore'), use_container_width=True, hide_index=True)
+            st.dataframe(df[mask].drop(columns=['Day_Index'], errors='ignore'), hide_index=True)
         else:
             st.info("No schedules have been published for the current period.")
 
@@ -181,7 +182,7 @@ def physician_view():
 
         st.markdown("##### Or Use Manual Grid")
         default_unavail = pd.DataFrame([{"Day": 1, "Start Time": datetime.time(8, 0), "End Time": datetime.time(17, 0)}])
-        edited_unavail = st.data_editor(default_unavail, num_rows="dynamic", hide_index=True, use_container_width=True)
+        edited_unavail = st.data_editor(default_unavail, num_rows="dynamic", hide_index=True)
         
         if st.button("Submit Grid Request", type="primary"):
             new_requests = []
@@ -196,7 +197,7 @@ def physician_view():
 def admin_view():
     with st.sidebar:
         st.success(f"Admin: **{st.session_state.current_name}**")
-        if st.button("Log Out", use_container_width=True):
+        if st.button("Log Out"):
             st.session_state.logged_in = False
             st.rerun()
         st.divider()
@@ -219,7 +220,7 @@ def admin_view():
                 ai_config_cmd = st.text_input("Instruction:", placeholder="E.g., 'Add a Swing Shift from 3pm to 11pm needing 2 headcount'")
             with col_btn:
                 st.write("") 
-                if st.button("Update Database", use_container_width=True):
+                if st.button("Update Database"):
                     if not api_key: st.error("API Key required in sidebar.")
                     else:
                         with st.spinner("Updating database..."):
@@ -247,19 +248,18 @@ def admin_view():
         col_shifts, col_docs = st.columns([1, 1.5])
         with col_shifts:
             st.markdown("#### Shift Definitions")
-            edited_shifts = st.data_editor(st.session_state.shifts_df, num_rows="dynamic", hide_index=True, use_container_width=True)
+            edited_shifts = st.data_editor(st.session_state.shifts_df, num_rows="dynamic", hide_index=True)
             st.session_state.shifts_df = edited_shifts 
             
         with col_docs:
             st.markdown("#### Provider Contracts")
-            edited_physicians = st.data_editor(st.session_state.physicians_df, num_rows="dynamic", hide_index=True, use_container_width=True)
+            edited_physicians = st.data_editor(st.session_state.physicians_df, num_rows="dynamic", hide_index=True)
             st.session_state.physicians_df = edited_physicians 
 
         st.divider()
         physicians_list = [r["Name"] for _, r in edited_physicians.iterrows() if pd.notna(r.get("Name")) and str(r.get("Name")).strip()]
         carryover_docs = st.multiselect("Boundary Management (Quarter Carryover)", physicians_list)
 
-    # Bulletproof Dictionary Comprehensions
     shift_reqs = {str(r["Shift Name"]).strip(): safe_int(r.get("Req Headcount")) for _, r in edited_shifts.iterrows() if pd.notna(r.get("Shift Name")) and str(r.get("Shift Name")).strip()}
     shift_times = {str(r["Shift Name"]).strip(): {"start": r["Start Time"], "end": r["End Time"]} for _, r in edited_shifts.iterrows() if pd.notna(r.get("Shift Name")) and str(r.get("Shift Name")).strip()}
     shift_ids = {str(r["Shift Name"]).strip(): r.get("Task ID") for _, r in edited_shifts.iterrows() if pd.notna(r.get("Shift Name")) and str(r.get("Shift Name")).strip()}
@@ -281,8 +281,8 @@ def admin_view():
             st.metric("Pending Time-Off Requests", req_count)
             with st.expander("Review Provider Submissions"):
                 if req_count > 0:
-                    st.dataframe(st.session_state.db_state["global_unavail"], use_container_width=True)
-                    if st.button("Clear All Requests", use_container_width=True):
+                    st.dataframe(st.session_state.db_state["global_unavail"])
+                    if st.button("Clear All Requests"):
                         st.session_state.db_state["global_unavail"] = []
                         save_data(st.session_state.db_state)
                         st.rerun()
@@ -293,7 +293,7 @@ def admin_view():
             st.markdown("#### AI Natural Language Constraints")
             user_req = st.text_area("Input custom overrides or soft preferences:", "Dr. Patel prefers Day Shifts.", height=150)
             
-            if st.button("🚀 Generate Optimal Schedule", type="primary", use_container_width=True):
+            if st.button("🚀 Generate Optimal Schedule", type="primary"):
                 if not api_key: st.error("API Key required in sidebar."); st.stop()
                 
                 total_shifts_needed = sum(shift_reqs.values()) * num_days
@@ -332,4 +332,134 @@ def admin_view():
                                 rules.append({"physician_name": req['physician'], "constraint_type": "hard_time_off", "target_day": req['day'], "target_shift": s_name})
 
                     st.write(f"Running OR-Tools Mathematical Optimization (Timeout: {solver_timeout}s)...")
-                    internal_
+                    internal_physicians = physicians_list + ["⚠️ UNASSIGNED GAP"]
+                    i_limits, i_n_limits, i_w_limits = p_limits.copy(), n_limits.copy(), w_limits.copy()
+                    i_limits["⚠️ UNASSIGNED GAP"] = i_n_limits["⚠️ UNASSIGNED GAP"] = i_w_limits["⚠️ UNASSIGNED GAP"] = 999 
+                    ghost_idx = len(internal_physicians) - 1
+
+                    model = cp_model.CpModel()
+                    shifts = {(p, d, s): model.NewBoolVar(f's_{p}_{d}_{s}') for p in range(len(internal_physicians)) for d in range(num_days) for s in range(len(shifts_list))}
+                    obj_terms = [] 
+                    
+                    for d in range(num_days):
+                        for s, s_name in enumerate(shifts_list):
+                            model.Add(sum(shifts[(p, d, s)] for p in range(len(internal_physicians))) == shift_reqs[s_name])
+
+                    for p in range(len(internal_physicians)):
+                        if p != ghost_idx:
+                            for d in range(num_days): 
+                                model.AddAtMostOne(shifts[(p, d, s)] for s in range(len(shifts_list)))
+                                
+                        model.Add(sum(shifts[(p, d, s)] for d in range(num_days) for s in range(len(shifts_list))) <= i_limits[internal_physicians[p]])
+                        if night_idx: model.Add(sum(shifts[(p, d, s)] for d in range(num_days) for s in night_idx) <= i_n_limits[internal_physicians[p]])
+                        if weekend_days: model.Add(sum(shifts[(p, d, s)] for d in weekend_days for s in range(len(shifts_list))) <= i_w_limits[internal_physicians[p]])
+
+                    for doc_name in carryover_docs:
+                        if doc_name in internal_physicians:
+                            p = internal_physicians.index(doc_name)
+                            for s, s_name in enumerate(shifts_list):
+                                t_start = shift_times[s_name]['start']
+                                if (t_start.hour * 60 + t_start.minute) < (min_rest_hours * 60):
+                                    model.Add(shifts[(p, 0, s)] == 0)
+
+                    shift_ints = {}
+                    for d in range(num_days):
+                        for s, s_name in enumerate(shifts_list):
+                            t = shift_times[s_name]
+                            start_m, end_m = d*1440 + t['start'].hour*60 + t['start'].minute, d*1440 + t['end'].hour*60 + t['end'].minute
+                            if end_m <= start_m: end_m += 1440
+                            shift_ints[(d, s)] = (start_m, end_m)
+
+                    keys = list(shift_ints.keys())
+                    for p, p_name in enumerate(internal_physicians):
+                        if p_name == "⚠️ UNASSIGNED GAP": continue 
+                        for i in range(len(keys)):
+                            for j in range(i + 1, len(keys)):
+                                d1, s1 = keys[i]; d2, s2 = keys[j]
+                                st1, en1 = shift_ints[(d1, s1)]; st2, en2 = shift_ints[(d2, s2)]
+                                gap = st2 - en1 if st2 >= en1 else (st1 - en2 if st1 >= en2 else -1)
+                                if gap < min_rest_hours * 60:
+                                    model.Add(shifts[(p, d1, s1)] + shifts[(p, d2, s2)] <= 1)
+
+                    for r in rules:
+                        if r.get("physician_name") not in physicians_list: continue 
+                        p = internal_physicians.index(r["physician_name"])
+                        c_type, t_d, t_s = r.get("constraint_type"), (r["target_day"] - 1) if r.get("target_day") else None, shifts_list.index(r["target_shift"]) if r.get("target_shift") in shifts_list else None
+                        
+                        if c_type == "hard_time_off":
+                            for d in ([t_d] if t_d is not None else range(num_days)):
+                                for s in ([t_s] if t_s is not None else range(len(shifts_list))):
+                                    if 0 <= d < num_days: model.Add(shifts[(p, d, s)] == 0)
+                        elif c_type == "soft_prefer_shift" and t_s is not None:
+                            for d in ([t_d] if t_d is not None else range(num_days)):
+                                if 0 <= d < num_days: obj_terms.append(shifts[(p, d, t_s)] * 10)
+
+                    for d in range(num_days):
+                        for s in range(len(shifts_list)): obj_terms.append(shifts[(ghost_idx, d, s)] * -10000)
+
+                    if obj_terms: model.Maximize(sum(obj_terms))
+
+                    solver = cp_model.CpSolver()
+                    solver.parameters.max_time_in_seconds = float(solver_timeout)
+
+                    if solver.Solve(model) in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+                        grid = []
+                        for d in range(num_days):
+                            row = {"Day": f"Day {d+1} ({['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][(d + day_offset) % 7]})", "Day_Index": d}
+                            for s, s_name in enumerate(shifts_list):
+                                docs = [internal_physicians[p] for p in range(len(internal_physicians)) if solver.Value(shifts[(p, d, s)]) == 1]
+                                row[s_name] = ", ".join(docs)
+                            grid.append(row)
+                        
+                        st.session_state.db_state["saved_schedule"] = grid
+                        save_data(st.session_state.db_state)
+                        status.update(label="Mathematical Schedule Generated!", state="complete", expanded=False)
+                        st.toast("New schedule published to Master view.", icon="🎉")
+                    else: 
+                        status.update(label="Infeasible Ruleset", state="error")
+                        st.error("🚨 **CONFLICT ERROR:** The solver failed to find a valid mathematical path. Try lowering the Rest Period slider or clearing Time-Off requests.")
+
+    with tab_master:
+        if st.session_state.db_state["saved_schedule"]:
+            df = pd.DataFrame(st.session_state.db_state["saved_schedule"])
+            display_df = df.drop(columns=['Day_Index'])
+            st.dataframe(display_df.style.map(lambda v: 'background-color: #ffcccc; color: #990000; font-weight: bold' if '⚠️ UNASSIGNED GAP' in str(v) else ''), hide_index=True)
+
+            st.markdown("#### Enterprise Integration")
+            col_date, col_btn = st.columns([1, 2])
+            with col_date:
+                start_date = st.date_input("Map 'Day 1' to Real-World Date:")
+            
+            flat = []
+            for idx, r in df.iterrows():
+                date_obj = start_date + datetime.timedelta(days=r["Day_Index"])
+                start_date_str = date_obj.strftime("%Y-%m-%d")
+                
+                for s_name in shifts_list:
+                    s_start = shift_times[s_name]['start']
+                    s_end = shift_times[s_name]['end']
+                    
+                    if s_end < s_start:
+                        end_date_str = (date_obj + datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+                    else:
+                        end_date_str = start_date_str
+                        
+                    for doc in [d.strip() for d in str(r[s_name]).split(",") if d.strip() and d.strip() != "nan"]:
+                        flat.append({
+                            "Start_Date": start_date_str,
+                            "End_Date": end_date_str,
+                            "Start_Time": s_start.strftime("%H:%M"),
+                            "End_Time": s_end.strftime("%H:%M"),
+                            "Provider_ID": p_ids.get(doc, "SYS-GAP"),
+                            "Task_ID": shift_ids.get(s_name, "UNKNOWN")
+                        })
+            with col_btn:
+                st.write("") 
+                st.download_button("📥 Download QGenda / Amion CSV Payload", pd.DataFrame(flat).to_csv(index=False).encode('utf-8'), 'enterprise_export.csv', 'text/csv')
+        else:
+            st.info("No schedule has been generated yet. Navigate to the AI Engine tab to build one.")
+
+# --- 7. ROUTER ---
+if not st.session_state.logged_in: login_screen()
+elif st.session_state.current_role == "Admin": admin_view()
+else: physician_view()
