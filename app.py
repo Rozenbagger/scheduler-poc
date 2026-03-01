@@ -39,7 +39,7 @@ def save_data(data):
 if "db_state" not in st.session_state:
     st.session_state.db_state = load_data()
 
-# Initialize dynamic DataFrames for AI modifications (NEW: Added 'Zone')
+# Initialize dynamic DataFrames for AI modifications
 if "shifts_df" not in st.session_state:
     st.session_state.shifts_df = pd.DataFrame([
         {"Task ID": "TSK-01", "Shift Name": "Day Shift", "Zone": "Main ER", "Start Time": datetime.time(7, 0), "End Time": datetime.time(15, 0), "Req Headcount": 2},
@@ -107,34 +107,29 @@ def times_overlap(s_start, s_end, u_start, u_end):
     if ue <= us: ue += 24 * 60
     return max(ss, us) < min(se, ue)
 
-# --- VISUAL CALENDAR RENDERER ---
+# --- VISUAL CALENDAR RENDERER (FIXED) ---
 def render_calendar_view(saved_schedule):
     if not saved_schedule:
         st.info("No schedule has been generated yet.")
         return
 
     try:
-        # Determine starting day of the week to pad the calendar correctly
         first_date_str = saved_schedule[0]["Date"]
         first_date = datetime.datetime.strptime(first_date_str, "%Y-%m-%d").date()
-        start_weekday = first_date.weekday() # Monday = 0, Sunday = 6
+        start_weekday = first_date.weekday() 
 
-        # Build the HTML/CSS Grid
         html = "<div style='display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; margin-top: 15px;'>"
         
-        # Day Headers
         days_of_week = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         for d in days_of_week:
             html += f"<div style='text-align: center; font-weight: bold; padding: 8px; background: #e9ecef; border-radius: 6px; color: #495057;'>{d}</div>"
             
-        # Empty cells for days before the start date
         for _ in range(start_weekday):
             html += "<div style='padding: 10px;'></div>"
 
-        # Populate the actual days
         for day in saved_schedule:
             d_obj = datetime.datetime.strptime(day["Date"], "%Y-%m-%d").date()
-            day_str = d_obj.strftime("%b %d") # e.g., Oct 01
+            day_str = d_obj.strftime("%b %d") 
             
             html += f"<div style='border: 1px solid #dee2e6; border-radius: 8px; padding: 10px; background: white; min-height: 140px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);'>"
             html += f"<div style='font-weight: bold; border-bottom: 2px solid #f8f9fa; margin-bottom: 8px; padding-bottom: 4px; color: #212529;'>{day_str}</div>"
@@ -143,21 +138,20 @@ def render_calendar_view(saved_schedule):
                 docs = shift["Physicians"]
                 if not docs: docs = "⚠️ UNASSIGNED"
                 
-                # Highlight missing coverage in red, standard assignments in blue
                 doc_color = "#dc3545" if "⚠️" in docs else "#0056b3"
                 doc_weight = "bold" if "⚠️" in docs else "500"
 
-                html += f"""
-                <div style='background: #f8f9fa; border-left: 4px solid #007bff; padding: 6px 8px; margin-bottom: 8px; border-radius: 4px;'>
-                    <div style='font-weight: bold; color: #343a40; font-size: 0.9em; margin-bottom: 2px;'>{shift["Name"]}</div>
-                    <div style='color: #6c757d; font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.5px;'>📍 {shift["Zone"]}</div>
-                    <div style='color: #495057; font-size: 0.8em; margin-bottom: 4px;'>🕒 {shift["Start"]} - {shift["End"]}</div>
-                    <div style='color: {doc_color}; font-weight: {doc_weight}; font-size: 0.85em;'>👨‍⚕️ {docs}</div>
-                </div>
-                """
-            html += "</div>" # End Day Cell
+                # FIXED: Removed indentation from string to prevent Markdown code block triggering
+                html += f"<div style='background: #f8f9fa; border-left: 4px solid #007bff; padding: 6px 8px; margin-bottom: 8px; border-radius: 4px;'>"
+                html += f"<div style='font-weight: bold; color: #343a40; font-size: 0.9em; margin-bottom: 2px;'>{shift['Name']}</div>"
+                html += f"<div style='color: #6c757d; font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.5px;'>📍 {shift['Zone']}</div>"
+                html += f"<div style='color: #495057; font-size: 0.8em; margin-bottom: 4px;'>🕒 {shift['Start']} - {shift['End']}</div>"
+                html += f"<div style='color: {doc_color}; font-weight: {doc_weight}; font-size: 0.85em;'>👨‍⚕️ {docs}</div>"
+                html += f"</div>"
+
+            html += "</div>" 
             
-        html += "</div>" # End Grid
+        html += "</div>" 
         st.markdown(html, unsafe_allow_html=True)
     except Exception as e:
         st.error(f"Error rendering calendar view: Ensure you generated a new schedule to apply the new data format. ({e})")
@@ -194,7 +188,6 @@ def physician_view():
     tab1, tab2 = st.tabs(["📅 Published Calendar", "🛑 Manage Time Off"])
     
     with tab1:
-        # Filter the structured JSON to only show days/shifts where this physician is assigned
         if st.session_state.db_state["saved_schedule"]:
             personal_schedule = []
             for day in st.session_state.db_state["saved_schedule"]:
@@ -322,7 +315,6 @@ def admin_view():
         physicians_list = [r["Name"] for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")]
         carryover_docs = st.multiselect("Select providers who worked the final overnight shift of the previous period:", physicians_list)
 
-    # Dictionary Map Generation
     shift_reqs = {r["Shift Name"]: int(r["Req Headcount"]) for _, r in st.session_state.shifts_df.iterrows() if r.get("Shift Name")}
     shift_times = {r["Shift Name"]: {"start": r["Start Time"], "end": r["End Time"]} for _, r in st.session_state.shifts_df.iterrows() if r.get("Shift Name")}
     shift_zones = {r["Shift Name"]: r.get("Zone", "Unspecified") for _, r in st.session_state.shifts_df.iterrows() if r.get("Shift Name")}
@@ -460,7 +452,6 @@ def admin_view():
 
                     if solver.Solve(model) in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
                         grid = []
-                        # Build the highly structured JSON needed for the new visual calendar
                         for d in range(num_days):
                             date_str = (schedule_start_date + datetime.timedelta(days=d)).strftime("%Y-%m-%d")
                             day_data = {"Date": date_str, "Shifts": []}
@@ -484,9 +475,9 @@ def admin_view():
                         st.error("Solver failed. The combination of constraints and time off requested is mathematically impossible.")
 
     with tab_master:
-        render_calendar_view(st.session_state.db_state["saved_schedule"])
+        render_calendar_view(st.session_state.db_state.get("saved_schedule"))
 
-        if st.session_state.db_state["saved_schedule"]:
+        if st.session_state.db_state.get("saved_schedule"):
             st.divider()
             st.markdown("#### Enterprise Integration")
             flat = []
