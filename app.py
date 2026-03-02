@@ -25,7 +25,6 @@ DB_FILE = "local_database.json"
 def load_data():
     default_data = {
         "global_unavail": [],
-        "global_preferences": [], # NEW: Storage for physician soft preferences
         "saved_schedule": None,
         "shifts": [
             {"Task ID": "TSK-01", "Shift Name": "Day Shift", "Zone": "Main ER", "Start Time": "07:00", "End Time": "15:00", "Req Headcount": 2},
@@ -57,6 +56,7 @@ def load_data():
                         for sub_k, sub_v in v.items():
                             if sub_k not in data[k]:
                                 data[k][sub_k] = sub_v
+                # Legacy upgrades for older saved JSONs
                 for req in data.get("global_unavail", []):
                     if "date" not in req:
                         req["date"] = datetime.date.today().strftime("%Y-%m-%d")
@@ -142,19 +142,21 @@ def parse_config_modifications(user_text, key, current_docs, current_shifts):
     response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
     return json.loads(response.text)
 
-# UPGRADED: Combined Time-Off and Preference Parser for Physicians
-def parse_physician_ai_request(user_text, key, today_date, shifts_list):
+def parse_time_off_requests(user_text, key, today_date):
     client = genai.Client(api_key=key)
     prompt = f"""
-    You are a scheduling assistant for a physician. Extract time-off requests AND shift preferences from their text.
-    Today's date is {today_date}. Available Shifts: {shifts_list}.
-    If they request an entire day off, use start="00:00" and end="23:59". Ensure times are "HH:MM".
-    
-    Respond ONLY with a JSON object matching this schema:
-    {{
-      "time_off": [{{ "date": "YYYY-MM-DD", "start": "HH:MM", "end": "HH:MM" }}],
-      "preferences": [{{ "constraint_type": "soft_prefer_shift" OR "soft_avoid_shift", "target_date": "YYYY-MM-DD" or null, "target_shift": "exact shift name" or null }}]
-    }}
+    You are a scheduling assistant. Extract time-off requests from the user's text.
+    Today's date is {today_date}. Use this to resolve relative dates like "tomorrow" or "next Friday".
+    If the user requests an entire day off, use start="00:00" and end="23:59".
+    Ensure times are strictly formatted as "HH:MM" in 24-hour time.
+    Respond ONLY with a JSON array matching this schema:
+    [
+      {{
+        "date": "YYYY-MM-DD",
+        "start": "HH:MM",
+        "end": "HH:MM"
+      }}
+    ]
     Text: "{user_text}"
     """
     response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt, config=types.GenerateContentConfig(response_mime_type="application/json"))
@@ -245,7 +247,7 @@ def physician_view():
             st.rerun()
             
     st.header(f"Physician Portal: {st.session_state.current_name}")
-    tab1, tab2 = st.tabs(["📅 Published Calendar", "🛑 Manage Availability & Preferences"])
+    tab1, tab2 = st.tabs(["📅 Published Calendar", "🛑 Manage Time Off"])
     
     with tab1:
         if st.session_state.db_state["saved_schedule"]:
@@ -262,51 +264,32 @@ def physician_view():
         col_ai, col_manual = st.columns([1.2, 1])
         
         with col_ai:
-            st.markdown("#### ✨ AI Scheduling Assistant")
-            ai_request = st.text_area("Tell Gemini when you need off or what shifts you prefer:", placeholder="e.g., 'I have a dentist appointment on Friday from 1:00 PM to 3:00 PM, and I prefer Day Shifts.'", height=115)
+            st.markdown("#### ✨ AI Time-Off Assistant")
+            ai_request = st.text_area("Tell Gemini when you need off:", placeholder="e.g., 'I have a dentist appointment on Friday from 1:00 PM to 3:00 PM, and I need all of next Monday off.'", height=115)
             
             if st.button("Submit Request via AI", type="primary", use_container_width=True):
                 api_key = st.session_state.db_state["settings"].get("api_key", "")
                 if not api_key:
                     st.error("System AI is currently disabled. Please contact your Administrator to configure the API key.")
                 else:
-                    with st.spinner("Gemini is processing your availability and preferences..."):
+                    with st.spinner("Gemini is processing your request..."):
                         try:
                             today_str = datetime.date.today().strftime("%Y-%m-%d")
-                            shifts_list = list(st.session_state.shifts_df["Shift Name"].values)
-                            parsed_reqs = parse_physician_ai_request(ai_request, api_key, today_str, shifts_list)
+                            parsed_reqs = parse_time_off_requests(ai_request, api_key, today_str)
                             
-                            # Handle Hard Time Off
-                            for req in parsed_reqs.get("time_off", []):
+                            for req in parsed_reqs:
                                 req["physician"] = st.session_state.current_name
                                 st.session_state.db_state["global_unavail"].append(req)
-                                
-                            # Handle Soft Preferences
-                            for pref in parsed_reqs.get("preferences", []):
-                                pref["physician_name"] = st.session_state.current_name
-                                st.session_state.db_state["global_preferences"].append(pref)
                             
                             save_data(st.session_state.db_state)
-                            st.toast("Availability and Preferences saved!", icon="✅")
+                            st.toast("Time off successfully submitted via AI!", icon="✅")
                             st.rerun()
                         except Exception as e:
-                            st.error(f"AI parsing failed. Please check your spelling or try manual entry. ({e})")
-                            
-            st.divider()
-            st.markdown("#### 🌟 Your Active Preferences")
-            my_prefs = [p for p in st.session_state.db_state.get("global_preferences", []) if p["physician_name"] == st.session_state.current_name]
-            if my_prefs:
-                st.dataframe(pd.DataFrame(my_prefs).drop(columns=["physician_name"]), use_container_width=True)
-                if st.button("Clear My Preferences", use_container_width=True):
-                    st.session_state.db_state["global_preferences"] = [p for p in st.session_state.db_state["global_preferences"] if p["physician_name"] != st.session_state.current_name]
-                    save_data(st.session_state.db_state)
-                    st.rerun()
-            else:
-                st.info("You have no active shift preferences.")
+                            st.error(f"AI parsing failed. Please try manual entry. ({e})")
         
         with col_manual:
-            st.markdown("#### ✍️ Manual Time-Off Entry")
-            st.markdown("Use this grid to block specific hours.")
+            st.markdown("#### ✍️ Manual Fallback")
+            st.markdown("Use this grid if you prefer to enter specific dates manually.")
             default_unavail = pd.DataFrame([{"Date": datetime.date.today(), "Start Time": datetime.time(8, 0), "End Time": datetime.time(17, 0)}])
             edited_unavail = st.data_editor(default_unavail, num_rows="dynamic", hide_index=True, use_container_width=True)
             if st.button("Submit Manual Entry", use_container_width=True):
@@ -324,17 +307,13 @@ def physician_view():
                 st.toast("Time off saved!", icon="✅")
                 st.rerun()
                 
-            st.divider()
-            st.markdown("#### 📋 Your Pending Time-Off")
-            my_reqs = [r for r in st.session_state.db_state["global_unavail"] if r["physician"] == st.session_state.current_name]
-            if my_reqs:
-                st.dataframe(pd.DataFrame(my_reqs).drop(columns=["physician"]), use_container_width=True)
-                if st.button("Clear My Time-Off", use_container_width=True):
-                    st.session_state.db_state["global_unavail"] = [r for r in st.session_state.db_state["global_unavail"] if r["physician"] != st.session_state.current_name]
-                    save_data(st.session_state.db_state)
-                    st.rerun()
-            else:
-                st.info("You have no pending time-off requests.")
+        st.divider()
+        st.markdown("#### 📋 Your Pending Requests")
+        my_reqs = [r for r in st.session_state.db_state["global_unavail"] if r["physician"] == st.session_state.current_name]
+        if my_reqs:
+            st.dataframe(pd.DataFrame(my_reqs).drop(columns=["physician"]), use_container_width=True)
+        else:
+            st.info("You have no pending time-off requests.")
 
 # --- 6. ADMIN PORTAL ---
 def admin_view():
@@ -413,12 +392,6 @@ def admin_view():
         st.divider()
 
         st.markdown("#### Provider Contracts (Min/Max Rules)")
-        doc_cols = ["Provider ID", "Name", "Min Total", "Max Total", "Min Nights", "Max Nights", "Min Weekends", "Max Weekends"]
-        for c in doc_cols:
-            if c not in st.session_state.physicians_df.columns:
-                st.session_state.physicians_df[c] = 0
-        st.session_state.physicians_df = st.session_state.physicians_df[doc_cols]
-        
         edited_docs = st.data_editor(st.session_state.physicians_df, num_rows="dynamic", hide_index=True, use_container_width=True, disabled=["Provider ID"])
         needs_update_docs = False
         for idx, row in edited_docs.iterrows():
@@ -465,9 +438,9 @@ def admin_view():
     shifts_list = list(shift_reqs.keys())
 
     # Max Limits
-    p_limits = {r["Name"]: int(r.get("Max Total", 0)) for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")}
-    n_limits = {r["Name"]: int(r.get("Max Nights", 0)) for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")}
-    w_limits = {r["Name"]: int(r.get("Max Weekends", 0)) for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")}
+    p_limits = {r["Name"]: int(r["Max Total"]) for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")}
+    n_limits = {r["Name"]: int(r["Max Nights"]) for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")}
+    w_limits = {r["Name"]: int(r["Max Weekends"]) for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")}
     
     # Min Limits
     p_min_limits = {r["Name"]: int(r.get("Min Total", 0)) for _, r in st.session_state.physicians_df.iterrows() if r.get("Name")}
@@ -482,26 +455,21 @@ def admin_view():
     with tab_engine:
         col_ai, col_requests = st.columns([2, 1])
         with col_requests:
-            req_count = len(st.session_state.db_state["global_unavail"]) + len(st.session_state.db_state.get("global_preferences", []))
-            st.metric("Pending Provider Requests & Preferences", req_count)
+            req_count = len(st.session_state.db_state["global_unavail"])
+            st.metric("Pending Time-Off Requests", req_count)
             with st.expander("Review Provider Submissions"):
                 if req_count > 0:
-                    st.markdown("**Time Off Requests**")
                     st.dataframe(st.session_state.db_state["global_unavail"], use_container_width=True)
-                    st.markdown("**Shift Preferences**")
-                    st.dataframe(st.session_state.db_state.get("global_preferences", []), use_container_width=True)
-                    
-                    if st.button("Clear ALL Requests & Preferences", use_container_width=True):
+                    if st.button("Clear All Requests", use_container_width=True):
                         st.session_state.db_state["global_unavail"] = []
-                        st.session_state.db_state["global_preferences"] = []
                         save_data(st.session_state.db_state)
                         st.toast("Requests cleared.", icon="🗑️")
                         st.rerun()
                 else: st.write("No pending requests.")
 
         with col_ai:
-            st.markdown("#### AI Admin Overrides")
-            user_req = st.text_area("Input custom overrides (Admin level):", f"Dr. Patel prefers Day Shifts.", height=150)
+            st.markdown("#### AI Natural Language Rules")
+            user_req = st.text_area("Input custom overrides or soft preferences:", f"Dr. Patel prefers Day Shifts.", height=150)
             
             if st.button("🚀 Generate Optimal Schedule", type="primary", use_container_width=True):
                 save_current_state()
@@ -509,42 +477,13 @@ def admin_view():
                     st.error("API Key required in sidebar.")
                     st.stop()
                 
-                # --- PRE-VALIDATION ENGINE ---
-                total_shifts_demand = sum(shift_reqs.values()) * num_days
-                total_nights_demand = sum(shift_reqs[s] for s in shifts_list if any(x in s.lower() for x in ["night", "24h", "sick"])) * num_days
-                total_weekends_demand = sum(shift_reqs.values()) * len(weekend_days)
-
-                total_min_req = sum(p_min_limits.values())
-                total_min_nights = sum(n_min_limits.values())
-                total_min_weekends = sum(w_min_limits.values())
-
-                errors = []
-                for p_name in physicians_list:
-                    if p_min_limits.get(p_name, 0) > p_limits.get(p_name, 0): errors.append(f"**{p_name}**: Min Total ({p_min_limits.get(p_name, 0)}) > Max Total ({p_limits.get(p_name, 0)})")
-                    if n_min_limits.get(p_name, 0) > n_limits.get(p_name, 0): errors.append(f"**{p_name}**: Min Nights > Max Nights")
-                    if w_min_limits.get(p_name, 0) > w_limits.get(p_name, 0): errors.append(f"**{p_name}**: Min Weekends > Max Weekends")
-
-                if total_min_req > total_shifts_demand: errors.append(f"**Global Capacity**: You require a minimum of {total_min_req} total shifts, but only {total_shifts_demand} exist.")
-                if total_min_nights > total_nights_demand: errors.append(f"**Global Capacity**: Combined Min Nights ({total_min_nights}) exceeds available night shifts ({total_nights_demand}).")
-                if total_min_weekends > total_weekends_demand: errors.append(f"**Global Capacity**: Combined Min Weekends ({total_min_weekends}) exceeds available weekend shifts ({total_weekends_demand}).")
-
-                if errors:
-                    st.error("🚨 **Pre-Validation Failed:** Your contractual limits are mathematically impossible. Please fix the Provider Contracts table:")
-                    for e in errors: st.markdown(f"- {e}")
-                    st.stop()
-                
                 rules = []
                 with st.status("Initializing Engine...", expanded=True) as status:
-                    st.write("Translating Admin AI Overrides...")
+                    st.write("Translating Natural Language to Math...")
                     try: rules = parse_constraints(user_req, api_key, physicians_list, shifts_list)
                     except Exception as e: 
                         status.update(label="AI Parsing Failed", state="error")
                         st.error(f"AI Error: {e}"); st.stop()
-
-                    # Merge in Physician-submitted preferences
-                    st.write("Injecting Physician Soft Preferences...")
-                    for pref in st.session_state.db_state.get("global_preferences", []):
-                        rules.append(pref)
 
                     st.write("Processing Provider Time-Off Logs...")
                     for req in st.session_state.db_state["global_unavail"]:
@@ -560,9 +499,11 @@ def admin_view():
                     st.write(f"Running OR-Tools Mathematical Optimization for {num_days} days...")
                     internal_physicians = physicians_list + ["⚠️ UNASSIGNED GAP"]
                     
+                    # Setup Max Limits
                     i_limits, i_n_limits, i_w_limits = p_limits.copy(), n_limits.copy(), w_limits.copy()
                     i_limits["⚠️ UNASSIGNED GAP"] = i_n_limits["⚠️ UNASSIGNED GAP"] = i_w_limits["⚠️ UNASSIGNED GAP"] = 999 
                     
+                    # Setup Min Limits (Ghost doctor has minimum of 0)
                     i_min_limits, i_n_min_limits, i_w_min_limits = p_min_limits.copy(), n_min_limits.copy(), w_min_limits.copy()
                     i_min_limits["⚠️ UNASSIGNED GAP"] = i_n_min_limits["⚠️ UNASSIGNED GAP"] = i_w_min_limits["⚠️ UNASSIGNED GAP"] = 0
 
@@ -572,24 +513,30 @@ def admin_view():
                     shifts = {(p, d, s): model.NewBoolVar(f's_{p}_{d}_{s}') for p in range(len(internal_physicians)) for d in range(num_days) for s in range(len(shifts_list))}
                     obj_terms = [] 
                     
+                    # 1. Headcount per shift
                     for d in range(num_days):
                         for s, s_name in enumerate(shifts_list):
                             model.Add(sum(shifts[(p, d, s)] for p in range(len(internal_physicians))) == shift_reqs[s_name])
 
+                    # 2. Limits Constraints (Max AND Min)
                     for p in range(len(internal_physicians)):
                         for d in range(num_days): model.AddAtMostOne(shifts[(p, d, s)] for s in range(len(shifts_list)))
                         
+                        # Total Shift Bounds
                         model.Add(sum(shifts[(p, d, s)] for d in range(num_days) for s in range(len(shifts_list))) <= i_limits[internal_physicians[p]])
                         model.Add(sum(shifts[(p, d, s)] for d in range(num_days) for s in range(len(shifts_list))) >= i_min_limits[internal_physicians[p]])
                         
+                        # Night Shift Bounds
                         if night_idx: 
                             model.Add(sum(shifts[(p, d, s)] for d in range(num_days) for s in night_idx) <= i_n_limits[internal_physicians[p]])
                             model.Add(sum(shifts[(p, d, s)] for d in range(num_days) for s in night_idx) >= i_n_min_limits[internal_physicians[p]])
                         
+                        # Weekend Shift Bounds
                         if weekend_days: 
                             model.Add(sum(shifts[(p, d, s)] for d in weekend_days for s in range(len(shifts_list))) <= i_w_limits[internal_physicians[p]])
                             model.Add(sum(shifts[(p, d, s)] for d in weekend_days for s in range(len(shifts_list))) >= i_w_min_limits[internal_physicians[p]])
 
+                    # 3. Boundary Carryover Constraints
                     for doc_name in carryover_docs:
                         if doc_name in internal_physicians:
                             p = internal_physicians.index(doc_name)
@@ -598,6 +545,7 @@ def admin_view():
                                 if (t_start.hour * 60 + t_start.minute) < (min_rest_hours * 60):
                                     model.Add(shifts[(p, 0, s)] == 0)
 
+                    # 4. Intra-Schedule Rest Periods
                     shift_ints = {}
                     for d in range(num_days):
                         for s, s_name in enumerate(shifts_list):
@@ -617,6 +565,7 @@ def admin_view():
                                 if gap < min_rest_hours * 60:
                                     model.Add(shifts[(p, d1, s1)] + shifts[(p, d2, s2)] <= 1)
 
+                    # 5. Apply AI Parsed Rules (Time off, Preferences)
                     for r in rules:
                         if r.get("physician_name") not in physicians_list: continue 
                         p = internal_physicians.index(r["physician_name"])
@@ -640,6 +589,7 @@ def admin_view():
                             for d in ([t_d] if t_d is not None else range(num_days)):
                                 if 0 <= d < num_days: obj_terms.append(shifts[(p, d, t_s)] * -10)
 
+                    # 6. Ghost Doctor Penalty (Keep gaps as low as mathematically possible)
                     for d in range(num_days):
                         for s in range(len(shifts_list)): obj_terms.append(shifts[(ghost_idx, d, s)] * -10000)
 
